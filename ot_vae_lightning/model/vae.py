@@ -80,7 +80,7 @@ class VAE(BaseModule):
 
              model = VAE(
                 metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
-                encoder=CNN(1, 64, 32, 2, None, 4, 2, True, False),
+                encoder=CNN(1, 128, 32, 2, None, 4, 2, True, False),
                 decoder=CNN(64, 1, 2, 32, None, 4, 2, False, True),
                 prior=GaussianPrior()
              )
