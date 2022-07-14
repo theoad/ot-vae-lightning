@@ -32,5 +32,28 @@ python model/vae.py fit --config configs/vanilla_vae.yaml --trainer.gpus 1 --opt
 
 ### Usage
 ```python
+from pytorch_lightning import Trainer, seed_everything
+from ot_vae_lightning.model import VAE
+from ot_vae_lightning.prior import GaussianPrior
+from ot_vae_lightning.data import MNISTDatamodule
+from ot_vae_lightning.networks import CNN
+from torchmetrics import MetricCollection
+from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
+
+if __name__ == "__main__":
+    seed_everything(42)
+
+    model = VAE(
+        metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
+        encoder=CNN(1, 128, 32, 2, None, 4, 2, True, False),
+        decoder=CNN(64, 1, 2, 32, None, 4, 2, False, True),
+        prior=GaussianPrior()
+    )
+
+    trainer = Trainer(limit_train_batches=50, limit_val_batches=20, max_epochs=2)
+    datamodule = MNISTDatamodule(train_batch_size=40)
+
+    trainer.fit(model, datamodule)
+    trainer.test(model, datamodule)
 ```   
