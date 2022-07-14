@@ -1,6 +1,10 @@
-pytorch-lightning
 torch
 torchvision
 torchaudio
+torch_fidelity
+pytorch-lightning
 torchmetrics
-jsonargparse
+jsonargparse[signatures]
+numpy
+sympy
+rich
