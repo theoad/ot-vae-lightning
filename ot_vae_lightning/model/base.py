@@ -35,23 +35,28 @@ class BaseModule(pl.LightningModule, ABC):
             self,
             metrics: Union[Metric, MetricCollection],
             learning_rate: float = 1e-3,
-            checkpoint: Optional[str] = None
+            checkpoint: Optional[str] = None,
+            **hparams,
     ):
         """
+        ----------------------------------------------------------------------------------------------------------------
+
         DO Initialize here::
 
-            - Fields that don't contain nets.Parameters
-            - Assign loss function to self.loss
+            - [Required]: Assign loss function to self.loss
+            - [Optional]: Fields that contain nn.Parameters (e.g. nn.Modules)
 
         DON'T Initialize here::
 
-            - nets.Modules - instead override self._init_modules()
-            - Datasets - instead override self._init_datasets()
-            - Metrics - instead override self._init_metrics()
+            - hyper-parameter attributes (e.g. self.learning_rate=learning_rate) - instead pass as kwargs to super().__init__()
+            - Datasets - implement datasets and dataloader related logic in a separated pl.DataModule.
+            - Metrics - instead pass as argument to super().__init__()
+
+        ----------------------------------------------------------------------------------------------------------------
         """
         super().__init__()
         # as nn.Module, metrics are automatically saved on checkpointing, so we don't save them as hparams
-        self.save_hyperparameters(ignore=['metrics'])
+        self.save_hyperparameters(hparams, ignore=['metrics'])
 
         self.loss = ...  # assign the loss function. (can be a list for alternate updates like GANs)
 
@@ -97,6 +102,15 @@ class BaseModule(pl.LightningModule, ABC):
         return self._log_dict(res)
 
     def _load_attr_state_dict(self, attr):
+        """
+        --> Why add a checkpoint loading methos on top of lightning's --ckpt_path ?
+        --> lightning's --ckpt_path loads weights as well as hparams and other metric states.
+            This custom checkpoint loading method loads only weights. In addition, the methods can load
+            partial attributes in a non-strict fashion (e.g. the module has self.encoder and self.decoder but
+            the checkpoint only has ['module.encoder'], then self.encoder weights will be restored).
+
+        TODO: Make it recursive ?
+        """
         if getattr(self, attr) is None or not isinstance(getattr(self, attr), torch.nn.Module):
             return
         assert os.path.exists(self.hparams.checkpoint), f'Error: Path {self.hparams.checkpoint} not found.'
