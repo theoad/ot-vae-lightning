@@ -35,5 +35,4 @@ def test_vanilla_vae():
     trainer.fit(model, datamodule)
 
     results = trainer.test(model, datamodule)
-    import IPython; IPython.embed(); exit(1)
     assert results[0]['test/psnr'] > 10
