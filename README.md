@@ -27,7 +27,7 @@ pip install git+https://github.com/theoad/ot-vae-lightning
 
 Run training
 ```bash
-python model/vae.py fit --config configs/vanilla_vae.yaml --trainer.gpus 1 --optimizer=Adam --optimizer.lr=0.001
+python model/vae.py fit --config configs/vanilla_vae.yaml --trainer.gpus 1
 ```
 
 ### Usage

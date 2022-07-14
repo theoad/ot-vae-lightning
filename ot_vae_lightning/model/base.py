@@ -31,7 +31,12 @@ class BaseModule(pl.LightningModule, ABC):
 
     .. _TheoA: https://github.com/theoad
     """
-    def __init__(self, metrics: Union[Metric, MetricCollection], checkpoint: Optional[str] = None):
+    def __init__(
+            self,
+            metrics: Union[Metric, MetricCollection],
+            learning_rate: float = 1e-3,
+            checkpoint: Optional[str] = None
+    ):
         """
         DO Initialize here::
 
@@ -69,6 +74,9 @@ class BaseModule(pl.LightningModule, ABC):
         loss, logs, pbatch = loss(self.batch_preprocess(batch), batch_idx)
         self._log_dict({**logs, **self.train_metrics(pbatch['preds'], pbatch['targets'])})
         return loss
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
 
     def _update_metrics(self, batch, batch_idx, mode):
         pbatch = self.batch_preprocess(batch)
