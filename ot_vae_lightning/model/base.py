@@ -56,7 +56,7 @@ class BaseModule(pl.LightningModule, ABC):
         """
         super().__init__()
         # as nn.Module, metrics are automatically saved on checkpointing, so we don't save them as hparams
-        self.save_hyperparameters(hparams, ignore=['metrics'])
+        self.save_hyperparameters(checkpoint, learning_rate, hparams, ignore=['metrics'])
 
         self.loss = ...  # assign the loss function. (can be a list for alternate updates like GANs)
 
