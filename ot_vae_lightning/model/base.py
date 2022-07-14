@@ -36,7 +36,6 @@ class BaseModule(pl.LightningModule, ABC):
             metrics: Union[Metric, MetricCollection],
             learning_rate: float = 1e-3,
             checkpoint: Optional[str] = None,
-            **hparams,
     ):
         """
         ----------------------------------------------------------------------------------------------------------------
@@ -48,7 +47,7 @@ class BaseModule(pl.LightningModule, ABC):
 
         DON'T Initialize here::
 
-            - hyper-parameter attributes (e.g. self.learning_rate=learning_rate) - instead pass as kwargs to super().__init__()
+            - [Optional]: hyper-parameter attributes (e.g. self.lr=lr) - instead use self.save_hyperparameters
             - Datasets - implement datasets and dataloader related logic in a separated pl.DataModule.
             - Metrics - instead pass as argument to super().__init__()
 
@@ -56,7 +55,7 @@ class BaseModule(pl.LightningModule, ABC):
         """
         super().__init__()
         # as nn.Module, metrics are automatically saved on checkpointing, so we don't save them as hparams
-        self.save_hyperparameters(checkpoint, learning_rate, hparams, ignore=['metrics'])
+        self.save_hyperparameters(ignore=['metrics'])
 
         self.loss = ...  # assign the loss function. (can be a list for alternate updates like GANs)
 
