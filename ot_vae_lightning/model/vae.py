@@ -16,44 +16,10 @@ from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
 from pytorch_lightning.utilities.cli import LightningCLI
-from torchmetrics.image.psnr import PeakSignalNoiseRatio
 from torchmetrics import Metric, MetricCollection
 from ot_vae_lightning.data import MNISTDatamodule
-from ot_vae_lightning.prior import Prior, GaussianPrior
+from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.model.base import BaseModule
-from ot_vae_lightning.networks import CNN
-from jsonargparse import lazy_instance
-
-
-default_encoder = lazy_instance(
-    CNN,
-    in_features=1,
-    out_features=128,  # must double number of channels to allow for re-param trick
-    in_resolution=32,
-    out_resolution=2,
-    capacity=4,
-    n_layers=2,
-    down_sample=2,
-)
-
-default_decoder = lazy_instance(
-    CNN,
-    in_features=64,
-    out_features=1,
-    in_resolution=2,
-    out_resolution=32,
-    capacity=4,
-    n_layers=2,
-    up_sample=2
-)
-
-default_metrics = lazy_instance(
-    PeakSignalNoiseRatio
-)
-
-default_prior = lazy_instance(
-    GaussianPrior
-)
 
 
 class VAE(BaseModule):
@@ -67,10 +33,10 @@ class VAE(BaseModule):
     .. _TheoA: https://github.com/theoad
     """
     def __init__(self,
-                 metrics: Union[Metric, MetricCollection] = default_metrics,
-                 encoder: nn.Module = default_encoder,
-                 decoder: nn.Module = default_decoder,
-                 prior: Prior = default_prior) -> None:
+                 metrics: Union[Metric, MetricCollection],
+                 encoder: nn.Module,
+                 decoder: nn.Module,
+                 prior: Prior) -> None:
         """
         Variational Auto Encoder with custom Prior
 
