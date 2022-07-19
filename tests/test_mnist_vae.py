@@ -30,11 +30,11 @@ def test_vanilla_vae():
         prior=GaussianPrior(loss_coeff=0.1)
     )
 
-    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=5)
+    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=1, enable_progress_bar=False)
     datamodule = MNISTDatamodule(train_batch_size=250)
     trainer.fit(model, datamodule)
     results = trainer.test(model, datamodule)
-    assert results[0]['test/psnr'] > 17
+    assert results[0]['test/psnr_epoch'] > 16
 
     model = VAE(
         metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
@@ -42,7 +42,7 @@ def test_vanilla_vae():
         prior=GaussianPrior(loss_coeff=0.1)
     )
 
-    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=5)
+    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=1, enable_progress_bar=False)
     trainer.fit(model, datamodule)
     results = trainer.test(model, datamodule)
-    assert results[0]['test/psnr'] > 17
+    assert results[0]['test/psnr_epoch'] > 16

@@ -88,13 +88,12 @@ class BaseModule(pl.LightningModule, ABC):
         if 'preds' not in pbatch.keys(): pbatch['preds'] = self(pbatch['samples'])
         res = getattr(self, f'{mode}_metrics')(pbatch['preds'], pbatch['targets'])
         self._log_dict(res)
-        return res
+        return pbatch
 
     def _log_dict(self, logs):
-        # slash_logs = {}
-        # for key in logs.keys(): slash_logs[key.replace("_", "/")] = logs[key]
-        # TODO: consider synd_dist=False and rank_zero_only=True
-        self.log_dict(logs, sync_dist=True, prog_bar=True, on_step=True, on_epoch=True)
+        slash_logs = {}
+        for key in logs.keys(): slash_logs[key.replace("_", "/")] = logs[key]
+        self.log_dict(slash_logs, sync_dist=True, prog_bar=True, on_step=True, on_epoch=True)
         return logs
 
     def _log_metric(self, mode):
