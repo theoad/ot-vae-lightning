@@ -8,3 +8,4 @@ jsonargparse[signatures]
 numpy
 sympy
 rich
+wandb
