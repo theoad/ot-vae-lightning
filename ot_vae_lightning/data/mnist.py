@@ -35,7 +35,8 @@ class MNISTDatamodule(BaseDatamodule):
     """
     def __init__(self,
                  root: str = os.path.expanduser("~/.cache"),
-                 no_pad: bool = False,
+                 pad: bool = False,
+                 normalize: bool = False,
                  train_val_split: float = 0.8,
                  seed: Optional[int] = None,
                  train_batch_size: int = 32,
@@ -47,7 +48,8 @@ class MNISTDatamodule(BaseDatamodule):
         Lightning DataModule form MNIST dataset
 
         :param root: Path to folder where data will be stored
-        :param no_pad: Set in order to keep image 28x28 (otherwise images will padded to 32x32)
+        :param pad: If ``True``, pad 28x28 images to 32x32.
+        :param normalize: If ``True``, normalize images using `mean=0.1307`, `std=0.3081`
         :param train_val_split: Train-validation split coefficient
         :param seed: integer seed for re reproducibility
         :param train_batch_size: Training batch size
@@ -65,11 +67,9 @@ class MNISTDatamodule(BaseDatamodule):
         MNIST(self.hparams.root, download=True, train=False)
 
     def setup(self, stage: Optional[str] = None) -> None:
-        transforms = T.ToTensor() if self.hparams.no_pad else T.Compose([T.Pad(2), T.ToTensor()])
+        padding = [T.Pad(2)] if self.hparams.pad else []
+        normalize = [T.Normalize((0.1307,), (0.3081,))] if self.hparams.normalize else []
+        transforms = T.Compose([*padding, T.ToTensor(), *normalize])
         self.train_ds = MNIST(self.hparams.root, download=False, train=True, transform=transforms)
         self.test_ds = MNIST(self.hparams.root, download=False, train=False, transform=transforms)
-        if self.hparams.train_val_split < 1:
-            train_size = int(len(self.train_ds) * self.hparams.train_val_split)
-            seed_generator = torch.Generator().manual_seed(self.hparams.seed) if self.hparams.seed is not None else None
-            split = [train_size, len(self.train_ds) - train_size]
-            self.train_ds, self.val_ds = random_split(self.train_ds, split, seed_generator)
+        self.train_ds, self.val_ds = self._dataset_split(self.train_ds, self.hparams.train_val_split, self.hparams.seed)

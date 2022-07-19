@@ -34,7 +34,6 @@ class BaseModule(pl.LightningModule, ABC):
     def __init__(
             self,
             metrics: Union[Metric, MetricCollection],
-            learning_rate: float = 1e-3,
             checkpoint: Optional[str] = None,
     ):
         """
@@ -47,15 +46,15 @@ class BaseModule(pl.LightningModule, ABC):
 
         DON'T Initialize here::
 
+            - [Required]: Metrics - instead pass as argument to super().__init__()
             - [Optional]: hyper-parameter attributes (e.g. self.lr=lr) - instead use self.save_hyperparameters
-            - Datasets - implement datasets and dataloader related logic in a separated pl.DataModule.
-            - Metrics - instead pass as argument to super().__init__()
+            - [Optional]: Datasets - implement datasets and dataloader related logic in a separated pl.DataModule.
 
         ----------------------------------------------------------------------------------------------------------------
         """
         super().__init__()
         # as nn.Module, metrics are automatically saved on checkpointing, so we don't save them as hparams
-        self.save_hyperparameters(ignore=['metrics'])
+        self.save_hyperparameters(checkpoint, ignore=['metrics'])
 
         self.loss = ...  # assign the loss function. (can be a list for alternate updates like GANs)
 
@@ -76,29 +75,33 @@ class BaseModule(pl.LightningModule, ABC):
     def training_step(self, batch, batch_idx, optimizer_idx=0):
         loss = self.loss[optimizer_idx] if hasattr(self.loss, '__getitem__') else self.loss
         loss, logs, pbatch = loss(self.batch_preprocess(batch), batch_idx)
-        self._log_dict({**logs, **self.train_metrics(pbatch['preds'], pbatch['targets'])})
+        self._log_dict(logs)
+        self._log_dict(self.train_metrics(pbatch['preds'], pbatch['targets']))
         return loss
 
+    @abstractmethod
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        pass
 
     def _update_metrics(self, batch, batch_idx, mode):
         pbatch = self.batch_preprocess(batch)
         if 'preds' not in pbatch.keys(): pbatch['preds'] = self(pbatch['samples'])
-        getattr(self, f'{mode}_metrics').update(pbatch['preds'], pbatch['targets'])
-        return pbatch
+        res = getattr(self, f'{mode}_metrics')(pbatch['preds'], pbatch['targets'])
+        self._log_dict(res)
+        return res
 
     def _log_dict(self, logs):
-        slash_logs = {}
-        for key in logs.keys(): slash_logs[key.replace("_", "/")] = logs[key]
+        # slash_logs = {}
+        # for key in logs.keys(): slash_logs[key.replace("_", "/")] = logs[key]
         # TODO: consider synd_dist=False and rank_zero_only=True
-        self.log_dict(slash_logs, sync_dist=True, prog_bar=True)
-        return slash_logs
+        self.log_dict(logs, sync_dist=True, prog_bar=True, on_step=True, on_epoch=True)
+        return logs
 
     def _log_metric(self, mode):
         res = getattr(self, f'{mode}_metrics').compute()
         getattr(self, f'{mode}_metrics').reset()
-        return self._log_dict(res)
+        self.logger.log_metrics(res)
+        return res
 
     def _load_attr_state_dict(self, attr):
         """

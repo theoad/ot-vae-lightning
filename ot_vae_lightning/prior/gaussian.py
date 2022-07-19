@@ -56,7 +56,10 @@ class GaussianPrior(Prior):
     def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         q = self.reparametrization(x)
         p = self.reparametrization(torch.zeros_like(x))
-        z = p.rsample()
+        z = q.rsample()
         if self.empirical_kl: loss = self.empirical_reverse_kl(p, q, z)
         else: loss = self.closed_form_reverse_kl(p, q)
         return z, loss
+
+    def sample(self, shape, device) -> Tensor:
+        return torch.randn(*shape, device=device)

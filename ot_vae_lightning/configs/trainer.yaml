@@ -1,0 +1,16 @@
+seed_everything: null
+trainer:
+  checkpoint_callback: null
+  enable_checkpointing: true
+  default_root_dir: null
+  gradient_clip_val: null
+  gpus: 1
+  log_gpu_memory: null
+  max_epochs: 50
+  strategy: null
+  sync_batchnorm: false
+  precision: 32
+  enable_model_summary: true
+  weights_save_path: null
+  num_sanity_val_steps: 2
+  benchmark: true

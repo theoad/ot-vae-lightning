@@ -30,6 +30,14 @@ class Prior(nn.Module, ABC):
         super().__init__()
         self._loss_coeff = loss_coeff
 
+    @abstractmethod
+    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        pass
+
+    @abstractmethod
+    def sample(self, shape, device) -> Tensor:
+        pass
+
     @staticmethod
     def empirical_reverse_kl(
             p: Distribution,
@@ -41,10 +49,6 @@ class Prior(nn.Module, ABC):
     @property
     def loss_coeff(self):
         return self._loss_coeff
-
-    @abstractmethod
-    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        pass
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         z, loss = self.encode(x)

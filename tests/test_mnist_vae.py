@@ -15,7 +15,7 @@ from pytorch_lightning import Trainer, seed_everything
 from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import GaussianPrior
 from ot_vae_lightning.data import MNISTDatamodule
-from ot_vae_lightning.networks import CNN
+from ot_vae_lightning.networks import CNN, AutoEncoder
 from torchmetrics import MetricCollection
 from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
@@ -25,14 +25,24 @@ def test_vanilla_vae():
 
     model = VAE(
         metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
-        encoder=CNN(1, 128, 32, 2, None, 4, 2, True, False),
-        decoder=CNN(64, 1, 2, 32, None, 4, 2, False, True),
-        prior=GaussianPrior()
+        encoder=CNN(1, 256, 32, 1, None, 8, 2, True, False, "batchnorm", "relu"),
+        decoder=CNN(128, 1, 1, 32, None, 8, 2, False, True, "batchnorm", "relu"),
+        prior=GaussianPrior(loss_coeff=0.1)
     )
 
-    trainer = Trainer(limit_train_batches=50, limit_val_batches=20, max_epochs=2)
-    datamodule = MNISTDatamodule(train_batch_size=40)
+    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=5)
+    datamodule = MNISTDatamodule(train_batch_size=250)
     trainer.fit(model, datamodule)
-
     results = trainer.test(model, datamodule)
-    assert results[0]['test/psnr'] > 10
+    assert results[0]['test/psnr'] > 17
+
+    model = VAE(
+        metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
+        autoencoder=AutoEncoder(1, 128, True, 32, 1, None, 8, 2, True, "batchnorm", "relu"),
+        prior=GaussianPrior(loss_coeff=0.1)
+    )
+
+    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=5)
+    trainer.fit(model, datamodule)
+    results = trainer.test(model, datamodule)
+    assert results[0]['test/psnr'] > 17
