@@ -379,7 +379,8 @@ class AutoEncoder(nn.Module):
         :param bias: If ``True``, adds a learnable bias to the output. Default: ``True``
         """
         super().__init__()
-        self.latent_size = torch.Size([latent_features, latent_features * (1 + int(double_encoded_features)), latent_resolution])
+        self.latent_size = torch.Size([latent_features * (1 + int(double_encoded_features)),
+                                       latent_resolution, latent_resolution])
 
         self.encoder = CNN(in_features, latent_features * (1 + int(double_encoded_features)), in_resolution,
                            latent_resolution, intermediate_features, capacity, n_layers, down_up_sample, False,

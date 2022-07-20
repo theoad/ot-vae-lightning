@@ -11,7 +11,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Tuple, Union, Optional
+from typing import Tuple, Union, Optional, Dict, List
 
 import torch
 from torch import Tensor
@@ -22,7 +22,7 @@ from pytorch_lightning.utilities.cli import LightningCLI
 from torchmetrics import Metric, MetricCollection
 from ot_vae_lightning.data import MNISTDatamodule
 from ot_vae_lightning.prior import Prior
-from ot_vae_lightning.model.base import BaseModule
+from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint
 from ot_vae_lightning.utils import Collage
 
 
@@ -36,14 +36,18 @@ class VAE(BaseModule):
 
     .. _TheoA: https://github.com/theoad
     """
+
+    Batch = Dict[str, Tensor]
+
     def __init__(self,
-                 metrics: Union[Metric, MetricCollection],
                  prior: Prior,
+                 metrics: Optional[MetricCollection] = None,
                  autoencoder: Optional[nn.Module] = None,
                  encoder: Optional[nn.Module] = None,
                  decoder: Optional[nn.Module] = None,
                  learning_rate: float = 1e-3,
-                 checkpoint: Optional[str] = None,
+                 out_transforms: Optional[callable] = None,
+                 checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
                  ) -> None:
         """
         Variational Auto Encoder with custom Prior
@@ -66,9 +70,12 @@ class VAE(BaseModule):
                             and `decoder` parameter are filled.
         :param encoder: A nn.Module with method `self.encode`. Can be left unfilled if `autoencoder` is filled
         :param decoder: A nn.Module with method `self.decode`. Can be left unfilled if `autoencoder` is filled
+        :param learning_rate: The model learning rate. Default `1e-3`
+        :param out_transforms: Transforms used to reverse the test transform for visualization (e.g. denormalize images)
+        :param checkpoints: See father class (ot_vae_lightning.model.base.BaseModule) docstring
         """
-        super().__init__(metrics, checkpoint)
-        self.save_hyperparameters(ignore=['metrics', 'prior', 'encoder', 'decoder', 'autoencoder'])
+        super().__init__(metrics, out_transforms, checkpoints)
+        self.save_hyperparameters()
         if autoencoder is None and (encoder is None or decoder is None):
             raise ValueError("At least one of `autoencoder` or (`encoder`, `decoder`) parameters must be set")
         if autoencoder is not None and (encoder is not None or decoder is not None):
@@ -88,9 +95,19 @@ class VAE(BaseModule):
             self.decoder = decoder
 
         self.prior = prior
-        self.loss = self.elbo
+        self.loss = self.loss_func
 
-    def batch_preprocess(self, batch):
+    @property
+    def latent_size(self):
+        if hasattr(self, 'autoencoder'):
+            enc_out = self.autoencoder.latent_size
+        else:
+            assert hasattr(self, 'encoder')
+            enc_out = self.encoder.out_size
+        enc_out[0] //= 2  # re-parametrization trick
+        return enc_out
+
+    def batch_preprocess(self, batch) -> Batch:
         x, y = batch
         return {'samples': x, 'targets': x}
 
@@ -121,7 +138,7 @@ class VAE(BaseModule):
     def forward(self, x: Tensor) -> Tensor:
         return self._forward(x)[0]
 
-    def elbo(self, batch, batch_idx):
+    def loss_func(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
         x = batch['targets']
         x_hat, prior_loss = self._forward(batch['samples'])
         batch['preds'] = x_hat
@@ -131,26 +148,30 @@ class VAE(BaseModule):
 
         loss = recon_loss + prior_loss
         logs = {
-            'train_loss_total': loss.item(),
-            'train_loss_recon': recon_loss.item(),
-            'train_loss_prior': prior_loss.item()
+            'train/loss/total': loss.item(),
+            'train/loss/recon': recon_loss.item(),
+            'train/loss/prior': prior_loss.item()
         }
         return loss, logs, batch
 
     @staticmethod
-    def collage_methods():
+    def collage_methods() -> List[str]:
         return ['reconstruction', 'generation']
 
-    def reconstruction(self, batch):
-        x = batch['targets']
-        x_hat = self(batch['samples'])
+    @ torch.no_grad()
+    def reconstruction(self, batch: Batch) -> List[Tensor]:
+        x = self.out_transforms(batch['targets'])
+        x_hat = self.out_transforms(self(batch['samples']))
         return [x, x_hat]
 
-    def generation(self, batch):
-        z, _ = self.encode(batch['samples'])
-        z = self.prior.sample(z.shape, self.device)
-        samples = self.decode(z)
-        return [samples]
+    @ torch.no_grad()
+    def generation(self, batch: Batch) -> List[Tensor]:
+        batch_size = batch['samples'].shape[0]
+        return [self.out_transforms(self.samples(batch_size))]
+
+    def samples(self, batch_size: int) -> Tensor:
+        z = self.prior.sample((batch_size, *self.latent_size), self.device)
+        return self.decode(z)
 
 
 if __name__ == '__main__':

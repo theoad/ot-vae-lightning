@@ -11,11 +11,9 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Any, Optional, List
-
-import pytorch_lightning as pl
-import wandb
+from typing import Any, Optional
 import torch
+import pytorch_lightning as pl
 from torchvision.utils import make_grid
 from pytorch_lightning.utilities.types import STEP_OUTPUT
 from pytorch_lightning import Callback
@@ -43,23 +41,16 @@ class Collage(Callback):
         self.log_interval = log_interval
         self.num_samples = num_samples
 
-    def log_images(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", batch: Any):
+    def log_images(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", batch: Any, mode: str = 'val'):
         for method in pl_module.collage_methods():
             inputs = pl_module.batch_preprocess(batch)
             img_list = getattr(pl_module, method)(inputs)
+            post_process = getattr(trainer.datamodule, f"{'train' if mode == 'train' else 'test'}_inverse_transform")
             if len(img_list) == 0:
                 return
             collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
             collage = make_grid(collage_tensor[:min(collage_tensor.size(0), self.num_samples)], nrow=1)
-            # wb_collage = wandb.Image(collage, caption=method)
-            trainer.logger.log_image(method, [collage], trainer.global_step)
-            # try:
-            #     collage = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
-            #     wb_collage = wandb.Image(make_grid(collage[:min(collage.size(0), self.num_samples)], nrow=1),
-            #                              caption=method)
-            #     trainer.logger.experiment.log({method: wb_collage})
-            # except:
-            #     import IPython; IPython.embed(); exit(1)
+            trainer.logger.log_image(f'{mode}/collage', [collage], trainer.global_step, caption=method)
 
     def on_validation_batch_end(
         self,
@@ -71,9 +62,9 @@ class Collage(Callback):
         dataloader_idx: int,
     ) -> None:
         if batch_idx == 0 and trainer.is_global_zero:
-            self.log_images(trainer, pl_module, batch)
+            self.log_images(trainer, pl_module, batch, 'test')
 
-    def on_train_batch_end(
+    def on_test_batch_end(
         self,
         trainer: "pl.Trainer",
         pl_module: "pl.LightningModule",
@@ -82,8 +73,20 @@ class Collage(Callback):
         batch_idx: int,
         unused: Optional[int] = 0,
     ) -> None:
-        pl_module.eval()
-        with torch.no_grad():
-            if trainer.global_step % trainer.log_every_n_steps == 0 and trainer.is_global_zero:
-                self.log_images(trainer, pl_module, batch)
-        pl_module.train()
+        if batch_idx == 0 and trainer.is_global_zero:
+            self.log_images(trainer, pl_module, batch, 'val')
+
+    def on_train_batch_end(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+        unused: int = 0,
+    ) -> None:
+        if trainer.global_step % trainer.log_every_n_steps == 0 and trainer.is_global_zero:
+            pl_module.eval()
+            with torch.no_grad():
+                    self.log_images(trainer, pl_module, batch, 'train')
+            pl_module.train()

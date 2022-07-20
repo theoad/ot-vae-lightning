@@ -15,7 +15,6 @@ class MNISTDatamodule(TorchvisionDatamodule):
         )
 
 
-
 class CIFAR10Datamodule(TorchvisionDatamodule):
     def __init__(self, *args, **kwargs):
         super().__init__(
