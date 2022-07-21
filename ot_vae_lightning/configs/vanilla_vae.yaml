@@ -25,15 +25,10 @@ model:
     init_args:
       loss_coeff: 0.1
       empirical_kl: false
-  out_transforms:
-    class_path: ot_vae_lightning.utils.UnNormalize
-    init_args:
-      mean: [0.1307]
-      std: [0.3081]
 data:
   train_val_split: 0.9
   seed: null
-  train_batch_size: 512
+  train_batch_size: 256
   val_batch_size: 1024
   test_batch_size: 1024
   num_workers: 10

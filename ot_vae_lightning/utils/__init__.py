@@ -1,7 +1,14 @@
 from typing import Union, Sequence
 from torch import Tensor
+import torchvision.transforms as T
 import torch.nn as nn
 from ot_vae_lightning.utils.collage import Collage
+
+
+class ToTensor(T.ToTensor):
+    def __call__(self, pic):
+        if isinstance(pic, Tensor): return pic
+        return super().__call__(pic)
 
 
 class UnNormalize(nn.Module):
@@ -24,5 +31,5 @@ class UnNormalize(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         if not self.inplace:
             x = x.clone()
-        x.mul_(self.std).add_(self.mean)
+        x.mul_(self.std.to(x.device)).add_(self.mean.to(x.device))
         return x

@@ -27,90 +27,116 @@ pip install git+https://github.com/theoad/ot-vae-lightning
 
 Run training
 ```bash
-python model/vae.py fit --config configs/vanilla_vae.yaml --trainer.gpus 1
+python model/vae.py \
+--config configs/trainer.yaml \
+--config configs/wandb.yaml \
+--config configs/vanilla_vae.yaml
 ```
 
 ## Usage
 
 ### Training using pytorch-lightning Trainer
 ```python
+import torch
 from pytorch_lightning.callbacks import RichProgressBar
 from pytorch_lightning import Trainer, seed_everything
+
+from torchmetrics import MetricCollection
+from torchmetrics.image.psnr import PeakSignalNoiseRatio
+
 from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import GaussianPrior
 from ot_vae_lightning.data import MNISTDatamodule
-from ot_vae_lightning.networks import AutoEncoder
-from torchmetrics import MetricCollection
-from torchmetrics.image.psnr import PeakSignalNoiseRatio
+from ot_vae_lightning.networks import CNN
 
 
 if __name__ == "__main__":
     seed_everything(42)
 
-    model = VAE(
-        metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
-        autoencoder=AutoEncoder(1, 128, True, 32, 1, None, 8, 2, True, "batchnorm", "relu"),
-        prior=GaussianPrior(loss_coeff=0.1)
+    
+    trainer = Trainer(max_epochs=10, callbacks=RichProgressBar())
+    datamodule = MNISTDatamodule(train_batch_size=250)
+
+    in_channels, in_resolution = 1, 32  # MNISTDatamodule pads MNIST images such that the resolution is a power of 2
+    latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
+
+    encoder = CNN(  # Simple nn.Module
+        in_channels,
+        latent_channels * 2,  # must double the number of channels in the encoder to allow re-parametrization trick
+        in_resolution,
+        latent_resolution,
+        capacity=8,
+        down_sample=True
     )
 
-    trainer = Trainer(max_epochs=2, callbacks=RichProgressBar())
-    datamodule = MNISTDatamodule(train_batch_size=40)
+    decoder = CNN(  # Simple nn.Module
+        latent_channels,
+        in_channels,
+        latent_resolution,
+        in_resolution,
+        capacity=8,
+        up_sample=True
+    )
 
+    model = VAE(  # LightningModule
+        metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
+        encoder=encoder,
+        decoder=decoder,
+        prior=GaussianPrior(loss_coeff=0.1),
+    )
+
+    assert model.latent_size == torch.Size((latent_channels, latent_resolution, latent_resolution))
+
+    # Train
     trainer.fit(model, datamodule)
-    trainer.save_checkpoint("vanilla_vae_mnist.ckpt", weights_only=True)
+    trainer.save_checkpoint("vanilla_vae.ckpt")
 
+    # Test
+    model.freeze()
     results = trainer.test(model, datamodule)
-    assert results[0]['test/psnr_epoch'] > 17
+    assert results[0]['test/metrics/psnr'] > 14
 ```
 
 ### Inference using the lightning model
+
 ```python
 import torch
+from torchvision.datasets import MNIST
 from ot_vae_lightning.model import VAE
-from ot_vae_lightning.data import MNISTDatamodule
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
+from pytorch_lightning import Trainer
 
-vae = VAE.load_from_checkpoint("vanilla_vae_mnist.ckpt")
-vae.eval()
+# Inference
+vae = VAE.load_from_checkpoint("vanilla_vae.ckpt")
+vae.freeze()  # put model in eval automatically
 
-data = MNISTDatamodule()
-preprocess = data.test_transform
-
-x = torch.randn(10, 1, 28, 28)
-
-with torch.no_grad():
-    x_hat = vae(preprocess(x))
-
-samples = vae.samples(10)
-```
-
-### Inference using the nn.Modules
-```python
-import torch
-from ot_vae_lightning.networks import AutoEncoder
-from ot_vae_lightning.data import MNISTDatamodule
-from ot_vae_lightning.prior import GaussianPrior
-
-# create the PyTorch model and load the checkpoint weights
-checkpoint = torch.load("vanilla_vae_mnist.ckpt")
-hyper_parameters = checkpoint["hyper_parameters"]
-
-# if you want to restore any hyperparameters, you can pass them too
-model = AutoEncoder(**hyper_parameters)
-prior = GaussianPrior()
-state_dict = checkpoint["state_dict"]
-
-# update keys by dropping `auto_encoder.`
-for key in state_dict.keys():
-    state_dict[key.replace("autoencoder.", "")] = state_dict.pop(key)
-
-model.load_state_dict(state_dict)
-model.eval()
-
-data = MNISTDatamodule()
-preprocess = data.test_transform
-
-x = torch.randn(10, 1, 28, 28)
+# The pre/post-processing transforms from the training datamodule are automatically loaded with the checkpoint
+# Use this flag to wrap user methods (forward, encode, decode) with appropriate pre/post-processing:
+# - normalize images before inputting to the model
+# - de-normalize model outputs
+vae.inference = True
 
 with torch.no_grad():
-    x_hat = model(preprocess(x))
+    x = torch.randn(10, 1, 28, 28)
+    z = vae.encode(x)  # pre-processing is done implicitly
+    assert z.shape == torch.Size((10, 128, 1, 1))
+
+    samples = vae.samples(batch_size=5)  # post-processing is done implicitly
+    assert samples.shape == torch.Size((5, 1, 28, 28))
+
+    x_hat = vae(x)  # pre-processing and post-processing are done implicitly
+    assert x_hat.shape == torch.Size((10, 1, 28, 28))
+
+# Inference in production. No transforms tailored to the pretrained model. Just raw data !
+raw_mnist = MNIST(
+    "~/.cache",
+    train=False,
+    transform=T.ToTensor(),
+    download=True
+)
+dl = DataLoader(raw_mnist, batch_size=250, shuffle=False)
+trainer = Trainer(gpus=..., strategy=...,)  # Use lightning trainer to have powerful distributed inference
+predictions = trainer.predict(vae, dl)
+assert predictions[0].shape == torch.Size((250, 1, 28, 28))  # type: ignore[arg-type]
 ```

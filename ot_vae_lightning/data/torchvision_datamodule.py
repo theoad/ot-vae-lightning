@@ -12,6 +12,8 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 ************************************************************************************************************************
 """
 from typing import Optional, Union, Tuple
+
+import torch
 from ot_vae_lightning.data import BaseDatamodule
 import torchvision.transforms as T
 import torchvision.datasets as datasets
@@ -32,33 +34,44 @@ class TorchvisionDatamodule(BaseDatamodule):
     def __init__(self,
                  dataset_name: str,
                  root: Union[str, Tuple[str, str]],
+                 download: bool = True,
+                 num_workers: int = 10,
                  train_transform: callable = T.ToTensor(),
+                 val_transform: callable = T.ToTensor(),
                  test_transform: callable = T.ToTensor(),
+                 predict_transform: callable = T.ToTensor(),
+                 inference_preprocess: callable = torch.nn.Identity(),
+                 inference_postprocess: callable = torch.nn.Identity(),
                  train_val_split: float = 0.9,
                  seed: Optional[int] = None,
                  train_batch_size: int = 32,
                  val_batch_size: int = 256,
                  test_batch_size: int = 256,
-                 num_workers: int = 10,
-                 download: bool = True,
+                 predict_batch_size: int = 256,
                  ) -> None:
         """
         Lightning DataModule form MNIST dataset
 
         :param dataset_name: Name of the dataset. Default: 'MNIST'
         :param root: Path to folder where data will be stored
-        :param train_transform: Transforms to apply on the train images
-        :param test_transform: Transforms to apply on the val/test images
+        :param download: If ``True``, the dataset is downloaded in `self.prepare_data`
+        :param num_workers: Number of CPUs available
+        :param train_transform: Transforms to apply on the `train` images
+        :param val_transform: Transforms to apply on the `validation` images
+        :param test_transform: Transforms to apply on the `test` images
+        :param predict_transform: Transforms to apply on the `predict` images
+        :param inference_preprocess: Transform to apply on raw data for inference (that did not go through train_transform)
+        :param inference_postprocess: used to reverse `preprocess` for inference, visualization (e.g. denormalize images)
         :param train_val_split: Train-validation split coefficient
         :param seed: integer seed for re reproducibility
         :param train_batch_size: Training batch size
         :param val_batch_size: Validation batch size
         :param test_batch_size: Testing batch size
-        :param num_workers: Number of CPUs available
-        :param download: If ``True``, the dataset is downloaded in `self.prepare_data`
+        :param predict_batch_size: Predict batch size
         """
-        super().__init__(train_transform, test_transform, train_val_split, seed, train_batch_size, val_batch_size,
-                         test_batch_size, num_workers)
+        super().__init__(num_workers, train_transform, val_transform, test_transform, predict_transform,
+                         inference_preprocess, inference_postprocess, train_val_split, seed, train_batch_size,
+                         val_batch_size, test_batch_size, predict_batch_size)
         self.dataset_cls = getattr(datasets, dataset_name)
 
         # Some datasets have arg `split` and others `train`
@@ -79,17 +92,32 @@ class TorchvisionDatamodule(BaseDatamodule):
             self.dataset_cls(self.hparams.root, download=True, **self._test_kwarg)
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.train_ds = self.dataset_cls(
+        self.train_dataset = self.dataset_cls(
             self.hparams.root[0] if isinstance(self.hparams.root, tuple) else self.hparams.root,
             transform=self.train_transform,
             **self._train_kwarg
         )
 
-        self.train_ds, self.val_ds = self._dataset_split(self.train_ds, self.hparams.train_val_split, self.hparams.seed)
-        if hasattr(self.val_ds, 'transforms'): self.val_ds.transforms = self.test_transform
-
-        self.test_ds = self.dataset_cls(
+        self.val_dataset = self.dataset_cls(
             self.hparams.root[0] if isinstance(self.hparams.root, tuple) else self.hparams.root,
+            transform=self.val_transform,
+            **self._train_kwarg
+        )
+
+        self.train_dataset, self.val_dataset = self._dataset_split(
+            datasets=[self.train_dataset, self.val_dataset],
+            split=self.hparams.train_val_split,
+            seed=self.hparams.seed
+        )
+
+        self.test_dataset = self.dataset_cls(
+            self.hparams.root[1] if isinstance(self.hparams.root, tuple) else self.hparams.root,
             transform=self.test_transform,
+            **self._test_kwarg
+        )
+
+        self.predict_dataset = self.dataset_cls(
+            self.hparams.root[1] if isinstance(self.hparams.root, tuple) else self.hparams.root,
+            transform=self.predict_transform,
             **self._test_kwarg
         )

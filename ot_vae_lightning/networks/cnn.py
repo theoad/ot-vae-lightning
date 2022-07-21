@@ -312,11 +312,11 @@ class AutoEncoder(nn.Module):
             # CNN params
             in_features: int,
             latent_features: int,
-            double_encoded_features: bool = False,  # for re-parametrization trick
             in_resolution: Optional[int] = None,
             latent_resolution: Optional[int] = None,
             intermediate_features: Optional[List[int]] = None,
             capacity: int = 8,
+            double_encoded_features: bool = False,  # for re-parametrization trick
 
             # ConvBlock params
             n_layers: int = 2,

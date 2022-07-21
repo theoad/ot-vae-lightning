@@ -12,9 +12,11 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 ************************************************************************************************************************
 """
 from abc import ABC
-from typing import Optional
+from typing import Optional, Union, Sequence
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch import randperm
+from torch.utils.data import DataLoader, Dataset, Subset
+from itertools import accumulate
 import torchvision.transforms as T
 import pytorch_lightning as pl
 
@@ -31,35 +33,50 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
 
     """
     def __init__(self,
+                 num_workers: int = 10,
                  train_transform: callable = T.ToTensor(),
+                 val_transform: callable = T.ToTensor(),
                  test_transform: callable = T.ToTensor(),
+                 predict_transform: callable = T.ToTensor(),
+                 inference_preprocess: callable = torch.nn.Identity(),
+                 inference_postprocess: callable = torch.nn.Identity(),
                  train_val_split: float = 0.9,
                  seed: Optional[int] = None,
                  train_batch_size: int = 32,
                  val_batch_size: int = 256,
                  test_batch_size: int = 256,
-                 num_workers: int = 10,
+                 predict_batch_size: int = 256,
                  ) -> None:
         """
         Lightning DataModule
 
-        :param train_transform: Transforms to apply on the train images
-        :param test_transform: Transforms to apply on the val/test images
+        :param train_transform: Transforms to apply on the `train` images
+        :param val_transform: Transforms to apply on the `validation` images
+        :param test_transform: Transforms to apply on the `test` images
+        :param predict_transform: Transforms to apply on the `predict` images
+        :param inference_preprocess: Transform to apply on raw data for inference (that did not go through train_transform)
+        :param inference_postprocess: used to reverse `preprocess` for inference, visualization (e.g. denormalize images)
         :param train_val_split: Train-validation split coefficient
         :param seed: integer seed for re reproducibility
         :param train_batch_size: Training batch size
         :param val_batch_size: Validation batch size
         :param test_batch_size: Testing batch size
+        :param predict_batch_size: Predict batch size
         :param num_workers: Number of CPUs available
         """
         super().__init__()
         self.save_hyperparameters()
-        self.train_transform, self.test_transform = train_transform, test_transform
-        self.train_ds, self.val_ds, self.test_ds = None, None, None
+        self.train_transform = train_transform
+        self.val_transform = val_transform
+        self.test_transform = test_transform
+        self.predict_transform = predict_transform
+        self.inference_preprocess = inference_preprocess
+        self.inference_postprocess = inference_postprocess
+        self.train_dataset, self.val_dataset, self.test_dataset, self.predict_dataset = None, None, None, None
 
     def _dataloader(self, mode: str):
         return DataLoader(
-            getattr(self, f'{mode}_ds'),
+            getattr(self, f'{mode}_dataset'),
             batch_size=getattr(self.hparams, f'{mode}_batch_size'),
             num_workers=self.hparams.num_workers,
             pin_memory=True,  # must pin memory for DDP
@@ -75,10 +92,41 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
     def test_dataloader(self):
         return self._dataloader('test')
 
+    def predict_dataloader(self):
+        return self._dataloader('predict')
+
     @staticmethod
-    def _dataset_split(dataset, split_prob=0.9, seed=None):
-        if split_prob < 1:
-            size = int(len(dataset) * split_prob)
-            seed_generator = torch.Generator().manual_seed(seed) if seed is not None else None
-            split = [size, len(dataset) - size]
-            return random_split(dataset, split, seed_generator)
+    def _dataset_split(
+            datasets: Sequence[Dataset],
+            split: Union[Sequence[int], float] = 0.9,
+            seed: Optional[int] = None
+    ):
+        r"""
+        Randomly split a dataset into non-overlapping new datasets of given lengths.
+        Optionally fix the generator for reproducible results.
+        Adapted from torch.utils.data.random_split to allow for different transform in each split
+
+        Args:
+            datasets (sequence of Dataset): Datasets to be split
+            split (sequence, float): sequence of length or proportion of splits (for a 2-fold split)
+            seed (int): seed used for the random permutation reproducibility.
+        """
+        length = len(datasets[0])   # type: ignore[arg-type]
+        for d in datasets:
+            assert len(d) == length, f"The datasets are expected to all have the same size. Found {length} and {len(d)}"   # type: ignore[arg-type]
+
+        if isinstance(split, float):
+            if split >= 1 or split <= 0:
+                ValueError(f"The split probability must verify 0 < split_prob < 1. Given: {split}")
+
+            size = int(length * split)
+            split = [size, length - size]
+
+        # Cannot verify that dataset is Sized
+        if sum(split) != length:  # type: ignore[arg-type]
+            raise ValueError(f"Sum of input lengths does not equal the length of the input datasets! Given length={length} and split={split}")
+
+        seed_generator = torch.Generator().manual_seed(seed) if seed is not None else None
+        indices = randperm(sum(split), generator=seed_generator).tolist()
+        return [Subset(d, indices[offset - length: offset]) for d, offset, length in zip(datasets, accumulate(split), split)]
+

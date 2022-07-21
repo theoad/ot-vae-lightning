@@ -11,7 +11,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Tuple, Optional, Dict, List
+from typing import Tuple, Optional, Dict, List, Union
 
 import torch
 from torch import Tensor
@@ -22,7 +22,7 @@ from pytorch_lightning.utilities.cli import LightningCLI
 from torchmetrics import MetricCollection
 from ot_vae_lightning.data import MNISTDatamodule
 from ot_vae_lightning.prior import Prior
-from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint
+from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint, support_preprocess, support_postprocess
 from ot_vae_lightning.utils import Collage
 
 
@@ -46,7 +46,6 @@ class VAE(BaseModule):
                  encoder: Optional[nn.Module] = None,
                  decoder: Optional[nn.Module] = None,
                  learning_rate: float = 1e-3,
-                 out_transforms: Optional[nn.Module] = None,
                  checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
                  ) -> None:
         """
@@ -71,11 +70,11 @@ class VAE(BaseModule):
         :param encoder: A nn.Module with method `self.encode`. Can be left unfilled if `autoencoder` is filled
         :param decoder: A nn.Module with method `self.decode`. Can be left unfilled if `autoencoder` is filled
         :param learning_rate: The model learning rate. Default `1e-3`
-        :param out_transforms: Transforms used to reverse the test transform for visualization (e.g. denormalize images)
         :param checkpoints: See father class (ot_vae_lightning.model.base.BaseModule) docstring
         """
-        super().__init__(metrics, out_transforms, checkpoints)
+        super().__init__(metrics, checkpoints)
         self.save_hyperparameters()
+
         if autoencoder is None and (encoder is None or decoder is None):
             raise ValueError("At least one of `autoencoder` or (`encoder`, `decoder`) parameters must be set")
         if autoencoder is not None and (encoder is not None or decoder is not None):
@@ -101,20 +100,20 @@ class VAE(BaseModule):
         x, y = batch
         return {'samples': x, 'targets': x}
 
+    @support_postprocess
+    @support_preprocess
     def forward(self, x: Tensor) -> Tensor:
-        return self._forward(x)[0]
-
-    def _forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        z, loss = self.encode(x)
-        x_hat = self.decode(z)
-        return x_hat, loss
+        z = self.encode(x, no_preprocess_override=True)
+        x_hat = self.decode(z, no_postprocess_override=True)
+        return x_hat
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
 
     def loss_func(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
         x = batch['targets']
-        x_hat, prior_loss = self._forward(batch['samples'])
+        z, prior_loss = self.encode(batch['samples'], return_prior_loss=True)
+        x_hat = self.decode(z)
         batch['preds'] = x_hat
 
         prior_loss = prior_loss.mean()
@@ -137,15 +136,21 @@ class VAE(BaseModule):
             enc_out = self.encoder.out_size
         return torch.Size((enc_out[0]//2, *enc_out[1:]))  # re-parametrization trick
 
-    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+    @support_preprocess
+    def encode(self, x: Tensor, return_prior_loss: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
         if hasattr(self, 'autoencoder'):
             encodings = self.autoencoder.encode(x)
         else:
             assert hasattr(self, 'encoder')
             encodings = self.encoder(x)
         z, prior_loss = self.prior(encodings)
-        return z, prior_loss
+        if return_prior_loss:
+            assert not self.inference, 'prior loss cannot be returned when model is in inference mode'
+            return z, prior_loss
+        else:
+            return z
 
+    @support_postprocess
     def decode(self, z: Tensor) -> Tensor:
         if hasattr(self, 'autoencoder'):
             return self.autoencoder.decode(z)
@@ -157,27 +162,27 @@ class VAE(BaseModule):
     def collage_methods() -> List[str]:
         return ['reconstruction', 'generation']
 
-    @ torch.no_grad()
+    @torch.no_grad()
     def reconstruction(self, batch: Batch) -> List[Tensor]:
-        x = self.out_transforms(batch['targets'])
-        x_hat = self.out_transforms(self(batch['samples']))
+        x = batch['targets']
+        x_hat = self(batch['samples'])
         return [x, x_hat]
 
-    @ torch.no_grad()
+    @torch.no_grad()
     def generation(self, batch: Batch) -> List[Tensor]:
         batch_size = batch['samples'].shape[0]
-        return [self.out_transforms(self.samples(batch_size)) for _ in range(4)]
+        return [self.samples(batch_size) for _ in range(4)]
 
+    @support_postprocess
     def samples(self, batch_size: int) -> Tensor:
         z = self.prior.sample((batch_size, *self.latent_size), self.device)
-        return self.decode(z)
+        return self.decode(z, no_postprocess_override=True)
 
 
 if __name__ == '__main__':
-    callbacks = [Collage()]#, RichProgressBar()]
+    callbacks = [Collage(), RichProgressBar()]
     cli = LightningCLI(VAE, MNISTDatamodule,
                        trainer_defaults=dict(default_root_dir='.', callbacks=callbacks),
                        run=False, save_config_overwrite=True)
-    cli.trainer.logger.watch(cli.model, log="all")
     cli.trainer.fit(cli.model, cli.datamodule)
     cli.trainer.test(cli.model, cli.datamodule)

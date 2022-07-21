@@ -12,7 +12,8 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 ************************************************************************************************************************
 """
 import os
-from typing import Optional, Dict
+import functools
+from typing import Optional, Dict, Any
 from collections import OrderedDict
 from abc import ABC, abstractmethod
 
@@ -47,6 +48,25 @@ class PartialCheckpoint:
         return state_dict
 
 
+def support_preprocess(method):
+    @functools.wraps(method)
+    def preprocess(self, samples, *args, no_preprocess_override=False, **kwargs):
+        if self.inference and not no_preprocess_override:
+            samples = self.inference_preprocess(samples)
+        return method(self, samples, *args, **kwargs)
+    return preprocess
+
+
+def support_postprocess(method):
+    @functools.wraps(method)
+    def postprocess(self, *args, no_postprocess_override=False, **kwargs):
+        out = method(self, *args, **kwargs)
+        if self.inference and not no_postprocess_override:
+            out = self.inference_postprocess(out)
+        return out
+    return postprocess
+
+
 class BaseModule(pl.LightningModule, ABC):
     """
     `PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of an abstract module
@@ -60,7 +80,6 @@ class BaseModule(pl.LightningModule, ABC):
     def __init__(
             self,
             metrics: Optional[MetricCollection] = None,
-            out_transforms: Optional[torch.nn.Module] = None,
             checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
     ):
         """
@@ -79,13 +98,14 @@ class BaseModule(pl.LightningModule, ABC):
 
         ----------------------------------------------------------------------------------------------------------------
 
-        :param metrics: torchmetrics.MetricCollection duplicated for train, validation and test
-        :param out_transforms: transforms used to reverse the test transform for visualization (e.g. denormalize images)
-        :param checkpoints: dictionary of attribute <-> Partial checkpoint (e.g. {'encoder': PartialCheckpoint}
+        :param metrics: Metrics (torchmetrics.MetricCollection) to use for train, validation and test
+        :param checkpoints: Dictionary of attribute <-> Partial checkpoint (e.g. {'encoder': PartialCheckpoint}
         """
         super().__init__()
         # as nn.Module, metrics are automatically saved on checkpointing, so we don't save them as hparams
         self.save_hyperparameters()
+
+        self.checkpoints = checkpoints
 
         self.loss = ...    # assign the loss function. (can be a list for alternate updates like GANs)
 
@@ -93,17 +113,26 @@ class BaseModule(pl.LightningModule, ABC):
         self.val_metrics = metrics.clone(prefix='val/metrics/') if metrics is not None else None
         self.test_metrics = metrics.clone(prefix='test/metrics/') if metrics is not None else None
 
-        # post processing like un-normalize. Must be scriptable (no PIL transforms nor lambda functions)
-        self.out_transforms = torch.nn.Identity() if out_transforms is None else out_transforms
-        self.checkpoints = checkpoints
+        self.inference_preprocess = None  # to be populated by checkpoint loading
+        self.inference_postprocess = None  # to be populated by checkpoint loading
+        self._inference_flag = False
 
     @abstractmethod
-    def batch_preprocess(self, batch):
+    def batch_preprocess(self, batch: Any) -> Dict[str, Any]:
         """
         Pre-process batch before feeding to self.loss and computing metrics.
 
         :param batch: Output of self.train_ds.__getitem__()
         :return: Dictionary (or any key-valued container) with at least the keys `samples` and `targets`
+        """
+        pass
+
+    @support_preprocess
+    @support_postprocess
+    @abstractmethod
+    def forward(self, *args, **kwargs) -> Any:
+        """
+        Implement as a regular forward
         """
         pass
 
@@ -114,23 +143,47 @@ class BaseModule(pl.LightningModule, ABC):
         self.log_dict({**logs, **metric_result}, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
         return loss
 
-    def on_fit_start(self) -> None:
-        return self._prepare_metrics('val')
-
-    def on_test_start(self) -> None:
-        return self._prepare_metrics('test')
-
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         return self._update_metrics(batch, batch_idx, 'val')
 
-    def test_step(self, batch, batch_idx):
+    def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         return self._update_metrics(batch, batch_idx, 'test')
+
+    def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
+        batch = self.batch_preprocess(batch)
+        out = self.forward(batch['samples'])
+        batch['preds'] = out
+        return out
 
     def validation_epoch_end(self, outputs):
         return self._compute_and_log_metric('val')
 
     def test_epoch_end(self, outputs):
         return self._compute_and_log_metric('test')
+
+    def on_train_epoch_start(self) -> None:
+        self.inference = False
+
+    def on_validation_epoch_start(self) -> None:
+        self.inference = True
+
+    def on_test_epoch_start(self) -> None:
+        self.inference = True
+
+    def on_predict_epoch_start(self) -> None:
+        self.inference = True
+
+    def on_fit_start(self) -> None:
+        self._set_inference_transforms()
+        return self._prepare_metrics('train')
+
+    def on_validation_start(self) -> None:
+        self._set_inference_transforms()
+        return self._prepare_metrics('val')
+
+    def on_test_start(self) -> None:
+        self._set_inference_transforms()
+        return self._prepare_metrics('test')
 
     @abstractmethod
     def configure_optimizers(self):
@@ -152,7 +205,7 @@ class BaseModule(pl.LightningModule, ABC):
 
     def _update_metrics(self, batch, batch_idx, mode):
         pbatch = self.batch_preprocess(batch)
-        if 'preds' not in pbatch.keys(): pbatch['preds'] = self(pbatch['samples'])
+        pbatch['preds'] = self(pbatch['samples'])
         getattr(self, f'{mode}_metrics').update(pbatch['preds'], pbatch['targets'])
         return pbatch
 
@@ -161,3 +214,34 @@ class BaseModule(pl.LightningModule, ABC):
         getattr(self, f'{mode}_metrics').reset()
         self.log_dict(res, sync_dist=True, prog_bar=True, logger=True)
         return res
+
+    def _set_inference_transforms(self) -> None:
+        if self.trainer is None or self.trainer.datamodule is None: return
+        if self.inference_preprocess is None and hasattr(self.trainer.datamodule, 'inference_preprocess'):
+            self.inference_preprocess = self.trainer.datamodule.inference_preprocess
+        if self.inference_postprocess is None and hasattr(self.trainer.datamodule, 'inference_postprocess'):
+            self.inference_postprocess = self.trainer.datamodule.inference_postprocess
+
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        if self.inference_preprocess is not None:
+            checkpoint['inference_preprocess'] = self.inference_preprocess
+        if self.inference_postprocess is not None:
+            checkpoint['inference_postprocess'] = self.inference_postprocess
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        if 'inference_preprocess' in checkpoint.keys():
+            self.inference_preprocess = checkpoint['inference_preprocess']
+        if 'inference_postprocess' in checkpoint.keys():
+            self.inference_postprocess = checkpoint['inference_postprocess']
+
+    @property
+    def inference(self):
+        return self._inference_flag
+
+    @inference.setter
+    def inference(self, boolean: bool):
+        if boolean:
+            assert self.inference_preprocess is not None and self.inference_postprocess,\
+                'Tried to set model in inference mode but ' \
+                'self.inference_preprocess or self.inference_postprocess in None'
+        self._inference_flag = boolean
