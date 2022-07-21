@@ -12,7 +12,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 ************************************************************************************************************************
 """
 import torch
-from torchvision.datasets import MNIST
+from torchvision.datasets import MNIST as RawMNIST
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
 from pytorch_lightning import Trainer, seed_everything
@@ -21,18 +21,18 @@ from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
 from ot_vae_lightning.model import VAE, PartialCheckpoint
 from ot_vae_lightning.prior import GaussianPrior
-from ot_vae_lightning.data import MNISTDatamodule
+from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.networks import CNN, AutoEncoder
 
 _PSNR_PERFORMANCE = 14
 _MAX_EPOCH = 10
 
 
-def test_vae_encoder_decoder_training(prog_bar=False, gpus=False):
+def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):
     seed_everything(42)
 
     trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
-    datamodule = MNISTDatamodule(train_batch_size=250)
+    datamodule = MNIST(train_batch_size=50)
 
     in_channels, in_resolution = 1, 32  # MNISTDatamodule pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
@@ -76,11 +76,11 @@ def test_vae_encoder_decoder_training(prog_bar=False, gpus=False):
     inference("vanilla_vae_encoder_decoder.ckpt")
 
 
-def test_vae_autoencoder_training(prog_bar=False, gpus=False):
+def test_vae_autoencoder_training(prog_bar=False, gpus=None):
     seed_everything(42)
 
     trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
-    datamodule = MNISTDatamodule(train_batch_size=250)
+    datamodule = MNIST(train_batch_size=50)
 
     in_channels, in_resolution = 1, 32  # MNISTDatamodule pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
@@ -157,7 +157,7 @@ def test_vae_autoencoder_training(prog_bar=False, gpus=False):
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
 
-def inference(ckpt_path, prog_bar=False, gpus=False):
+def inference(ckpt_path, prog_bar=False, gpus=None):
     trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
 
     # Inference
@@ -181,16 +181,16 @@ def inference(ckpt_path, prog_bar=False, gpus=False):
         assert x_hat.shape == torch.Size((10, 1, 28, 28))
 
     # Inference in production. No transforms tailored to the pretrained model. Just raw data !
-    raw_mnist = MNIST(
+    raw_mnist = RawMNIST(
         "~/.cache",
         train=False,
         transform=T.ToTensor(),
         download=True
     )
 
-    dl = DataLoader(raw_mnist, batch_size=250, shuffle=False)
+    dl = DataLoader(raw_mnist, batch_size=50, shuffle=False)
     predictions = trainer.predict(vae, dl)
-    assert predictions[0].shape == torch.Size((250, 1, 28, 28))  # type: ignore[arg-type]
+    assert predictions[0].shape == torch.Size((50, 1, 28, 28))  # type: ignore[arg-type]
 
     psnr = PeakSignalNoiseRatio()
     for i, (x, _) in enumerate(dl):
@@ -201,13 +201,13 @@ def inference(ckpt_path, prog_bar=False, gpus=False):
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
 
-def test_inference(prog_bar=False, gpus=False):
+def test_inference(prog_bar=False, gpus=None):
     inference("vanilla_vae_encoder_decoder.ckpt", prog_bar, gpus)
     inference("vanilla_vae_autoencoder.ckpt", prog_bar, gpus)
 
 
 if __name__ == "__main__":
-    pbar, gpu = True, True
+    pbar, gpu = True, 1
     test_vae_encoder_decoder_training(pbar, gpu)
     test_vae_autoencoder_training(pbar, gpu)
     test_inference(pbar, gpu)

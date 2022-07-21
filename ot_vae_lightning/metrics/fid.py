@@ -28,6 +28,7 @@ from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning import LightningModule
 from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
+
 class FID(Metric):
     """
     `PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of

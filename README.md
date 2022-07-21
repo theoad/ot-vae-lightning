@@ -36,6 +36,7 @@ python model/vae.py \
 ## Usage
 
 ### Training using pytorch-lightning Trainer
+
 ```python
 import torch
 from pytorch_lightning.callbacks import RichProgressBar
@@ -46,16 +47,14 @@ from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
 from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import GaussianPrior
-from ot_vae_lightning.data import MNISTDatamodule
+from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.networks import CNN
-
 
 if __name__ == "__main__":
     seed_everything(42)
 
-    
     trainer = Trainer(max_epochs=10, callbacks=RichProgressBar())
-    datamodule = MNISTDatamodule(train_batch_size=250)
+    datamodule = MNIST(train_batch_size=250)
 
     in_channels, in_resolution = 1, 32  # MNISTDatamodule pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]

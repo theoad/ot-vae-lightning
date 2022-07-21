@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from pytorch_lightning.callbacks import RichProgressBar
 from pytorch_lightning.utilities.cli import LightningCLI
 from torchmetrics import MetricCollection
-from ot_vae_lightning.data import MNISTDatamodule
+from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint, support_preprocess, support_postprocess
 from ot_vae_lightning.utils import Collage
@@ -181,7 +181,7 @@ class VAE(BaseModule):
 
 if __name__ == '__main__':
     callbacks = [Collage(), RichProgressBar()]
-    cli = LightningCLI(VAE, MNISTDatamodule,
+    cli = LightningCLI(VAE, MNIST,
                        trainer_defaults=dict(default_root_dir='.', callbacks=callbacks),
                        run=False, save_config_overwrite=True)
     cli.trainer.fit(cli.model, cli.datamodule)

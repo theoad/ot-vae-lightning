@@ -151,7 +151,7 @@ class BaseModule(pl.LightningModule, ABC):
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         batch = self.batch_preprocess(batch)
-        out = self.forward(batch['samples'])
+        out = self.forward(batch['samples'])  # type: ignore[arg-type]
         batch['preds'] = out
         return out
 
@@ -216,11 +216,13 @@ class BaseModule(pl.LightningModule, ABC):
         return res
 
     def _set_inference_transforms(self) -> None:
-        if self.trainer is None or self.trainer.datamodule is None: return
-        if self.inference_preprocess is None and hasattr(self.trainer.datamodule, 'inference_preprocess'):
-            self.inference_preprocess = self.trainer.datamodule.inference_preprocess
-        if self.inference_postprocess is None and hasattr(self.trainer.datamodule, 'inference_postprocess'):
-            self.inference_postprocess = self.trainer.datamodule.inference_postprocess
+        if self.trainer is None or self.trainer.datamodule is None:  # type: ignore[arg-type]
+            return
+        dm = self.trainer.datamodule  # type: ignore[arg-type]
+        if self.inference_preprocess is None and hasattr(dm, 'inference_preprocess'):
+            self.inference_preprocess = dm.inference_preprocess
+        if self.inference_postprocess is None and hasattr(dm, 'inference_postprocess'):
+            self.inference_postprocess = dm.inference_postprocess
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         if self.inference_preprocess is not None:

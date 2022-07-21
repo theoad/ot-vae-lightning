@@ -54,8 +54,8 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
         :param val_transform: Transforms to apply on the `validation` images
         :param test_transform: Transforms to apply on the `test` images
         :param predict_transform: Transforms to apply on the `predict` images
-        :param inference_preprocess: Transform to apply on raw data for inference (that did not go through train_transform)
-        :param inference_postprocess: used to reverse `preprocess` for inference, visualization (e.g. denormalize images)
+        :param inference_preprocess: Transform to apply on raw inference data (that did not go through train_transform)
+        :param inference_postprocess: used to reverse `preprocess` in inference, visualization (e.g. denormalize images)
         :param train_val_split: Train-validation split coefficient
         :param seed: integer seed for re reproducibility
         :param train_batch_size: Training batch size
@@ -113,7 +113,11 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
         """
         length = len(datasets[0])   # type: ignore[arg-type]
         for d in datasets:
-            assert len(d) == length, f"The datasets are expected to all have the same size. Found {length} and {len(d)}"   # type: ignore[arg-type]
+            assert (
+                len(d) == length,  # type: ignore[arg-type]
+                f"The datasets are expected to all have the same size. "
+                f"Found {length} and {len(d)}"  # type: ignore[arg-type]
+            )
 
         if isinstance(split, float):
             if split >= 1 or split <= 0:
@@ -124,9 +128,12 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
 
         # Cannot verify that dataset is Sized
         if sum(split) != length:  # type: ignore[arg-type]
-            raise ValueError(f"Sum of input lengths does not equal the length of the input datasets! Given length={length} and split={split}")
+            raise ValueError(f"Sum of input lengths does not equal the length of the input datasets! "
+                             f"Given length={length} and split={split}")
 
         seed_generator = torch.Generator().manual_seed(seed) if seed is not None else None
         indices = randperm(sum(split), generator=seed_generator).tolist()
-        return [Subset(d, indices[offset - length: offset]) for d, offset, length in zip(datasets, accumulate(split), split)]
+        return [
+            Subset(d, indices[offset - length: offset]) for d, offset, length in zip(datasets, accumulate(split), split)
+        ]
 
