@@ -21,7 +21,8 @@ from ot_vae_lightning.data import MNISTDatamodule
 from ot_vae_lightning.networks import CNN, AutoEncoder
 from ot_vae_lightning.utils import UnNormalize
 
-_PSNR_PERFORMANCE = 16
+_PSNR_PERFORMANCE = 15
+_MAX_EPOCH = 10
 
 
 def test_vanilla_vae_encoder_decoder():
@@ -35,7 +36,7 @@ def test_vanilla_vae_encoder_decoder():
         out_transforms=UnNormalize((0.1307,), (0.3081,))
     )
 
-    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=10, enable_progress_bar=False)
+    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=_MAX_EPOCH, enable_progress_bar=False)
     datamodule = MNISTDatamodule(train_batch_size=250)
     trainer.fit(model, datamodule)
     trainer.save_checkpoint("vanilla_vae_encoder_decoder.ckpt")
@@ -61,7 +62,7 @@ def test_vanilla_vae_autoencoder():
     )
 
     # Training
-    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=10, enable_progress_bar=True)
+    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=_MAX_EPOCH, enable_progress_bar=True)
     datamodule = MNISTDatamodule(train_batch_size=250)
     trainer.fit(model, datamodule)
     trainer.save_checkpoint("vanilla_vae_autoencoder.ckpt")
@@ -96,7 +97,7 @@ def test_vanilla_vae_autoencoder():
     # import IPython; IPython.embed(); exit(1)
 
     vae.setup()
-    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=10, enable_progress_bar=True)
+    trainer = Trainer(limit_train_batches=250, limit_val_batches=40, max_epochs=_MAX_EPOCH, enable_progress_bar=True)
     results = trainer.test(vae, datamodule)
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
