@@ -11,7 +11,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Tuple, Union, Optional, Dict, List
+from typing import Tuple, Optional, Dict, List
 
 import torch
 from torch import Tensor
@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning.callbacks import RichProgressBar
 from pytorch_lightning.utilities.cli import LightningCLI
-from torchmetrics import Metric, MetricCollection
+from torchmetrics import MetricCollection
 from ot_vae_lightning.data import MNISTDatamodule
 from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint
@@ -46,7 +46,7 @@ class VAE(BaseModule):
                  encoder: Optional[nn.Module] = None,
                  decoder: Optional[nn.Module] = None,
                  learning_rate: float = 1e-3,
-                 out_transforms: Optional[callable] = None,
+                 out_transforms: Optional[nn.Module] = None,
                  checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
                  ) -> None:
         """
@@ -97,46 +97,20 @@ class VAE(BaseModule):
         self.prior = prior
         self.loss = self.loss_func
 
-    @property
-    def latent_size(self):
-        if hasattr(self, 'autoencoder'):
-            enc_out = self.autoencoder.latent_size
-        else:
-            assert hasattr(self, 'encoder')
-            enc_out = self.encoder.out_size
-        enc_out[0] //= 2  # re-parametrization trick
-        return enc_out
-
     def batch_preprocess(self, batch) -> Batch:
         x, y = batch
         return {'samples': x, 'targets': x}
 
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-
-    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        if hasattr(self, 'autoencoder'):
-            encodings = self.autoencoder.encode(x)
-        else:
-            assert hasattr(self, 'encoder')
-            encodings = self.encoder(x)
-        z, prior_loss = self.prior(encodings)
-        return z, prior_loss
-
-    def decode(self, z: Tensor) -> Tensor:
-        if hasattr(self, 'autoencoder'):
-            return self.autoencoder.decode(z)
-        else:
-            assert hasattr(self, 'decoder')
-            return self.decoder(z)
+    def forward(self, x: Tensor) -> Tensor:
+        return self._forward(x)[0]
 
     def _forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         z, loss = self.encode(x)
         x_hat = self.decode(z)
         return x_hat, loss
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self._forward(x)[0]
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
 
     def loss_func(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
         x = batch['targets']
@@ -154,6 +128,31 @@ class VAE(BaseModule):
         }
         return loss, logs, batch
 
+    @property
+    def latent_size(self):
+        if hasattr(self, 'autoencoder'):
+            enc_out = self.autoencoder.latent_size
+        else:
+            assert hasattr(self, 'encoder')
+            enc_out = self.encoder.out_size
+        return torch.Size((enc_out[0]//2, *enc_out[1:]))  # re-parametrization trick
+
+    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        if hasattr(self, 'autoencoder'):
+            encodings = self.autoencoder.encode(x)
+        else:
+            assert hasattr(self, 'encoder')
+            encodings = self.encoder(x)
+        z, prior_loss = self.prior(encodings)
+        return z, prior_loss
+
+    def decode(self, z: Tensor) -> Tensor:
+        if hasattr(self, 'autoencoder'):
+            return self.autoencoder.decode(z)
+        else:
+            assert hasattr(self, 'decoder')
+            return self.decoder(z)
+
     @staticmethod
     def collage_methods() -> List[str]:
         return ['reconstruction', 'generation']
@@ -167,7 +166,7 @@ class VAE(BaseModule):
     @ torch.no_grad()
     def generation(self, batch: Batch) -> List[Tensor]:
         batch_size = batch['samples'].shape[0]
-        return [self.out_transforms(self.samples(batch_size))]
+        return [self.out_transforms(self.samples(batch_size)) for _ in range(4)]
 
     def samples(self, batch_size: int) -> Tensor:
         z = self.prior.sample((batch_size, *self.latent_size), self.device)
@@ -175,7 +174,7 @@ class VAE(BaseModule):
 
 
 if __name__ == '__main__':
-    callbacks = [Collage(), RichProgressBar()]
+    callbacks = [Collage()]#, RichProgressBar()]
     cli = LightningCLI(VAE, MNISTDatamodule,
                        trainer_defaults=dict(default_root_dir='.', callbacks=callbacks),
                        run=False, save_config_overwrite=True)

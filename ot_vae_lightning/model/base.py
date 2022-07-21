@@ -32,7 +32,7 @@ class PartialCheckpoint:
         self.attr_name = attr_name
         self.checkpoint_path = checkpoint_path
         self.replace_str = replace_str
-        # assert os.path.exists(checkpoint_path), f'Error: Path {checkpoint_path} not found.'
+        assert os.path.exists(checkpoint_path), f'Error: Path {checkpoint_path} not found.'
 
     def state_dict(self):
         checkpoint = torch.load(self.checkpoint_path)
@@ -60,7 +60,7 @@ class BaseModule(pl.LightningModule, ABC):
     def __init__(
             self,
             metrics: Optional[MetricCollection] = None,
-            out_transforms: Optional[callable] = None,
+            out_transforms: Optional[torch.nn.Module] = None,
             checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
     ):
         """
@@ -98,10 +98,6 @@ class BaseModule(pl.LightningModule, ABC):
         self.checkpoints = checkpoints
 
     @abstractmethod
-    def configure_optimizers(self):
-        pass
-
-    @abstractmethod
     def batch_preprocess(self, batch):
         """
         Pre-process batch before feeding to self.loss and computing metrics.
@@ -117,6 +113,28 @@ class BaseModule(pl.LightningModule, ABC):
         metric_result = self.train_metrics(pbatch['preds'], pbatch['targets'])
         self.log_dict({**logs, **metric_result}, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
         return loss
+
+    def on_fit_start(self) -> None:
+        return self._prepare_metrics('val')
+
+    def on_test_start(self) -> None:
+        return self._prepare_metrics('test')
+
+    def validation_step(self, batch, batch_idx):
+        return self._update_metrics(batch, batch_idx, 'val')
+
+    def test_step(self, batch, batch_idx):
+        return self._update_metrics(batch, batch_idx, 'test')
+
+    def validation_epoch_end(self, outputs):
+        return self._compute_and_log_metric('val')
+
+    def test_epoch_end(self, outputs):
+        return self._compute_and_log_metric('test')
+
+    @abstractmethod
+    def configure_optimizers(self):
+        pass
 
     def setup(self, stage=None):
         # Checkpoint loading. Let you load partial attributes.
@@ -143,21 +161,3 @@ class BaseModule(pl.LightningModule, ABC):
         getattr(self, f'{mode}_metrics').reset()
         self.log_dict(res, sync_dist=True, prog_bar=True, logger=True)
         return res
-
-    def on_fit_start(self) -> None:
-        return self._prepare_metrics('val')
-
-    def on_test_start(self) -> None:
-        return self._prepare_metrics('test')
-
-    def validation_step(self, batch, batch_idx):
-        return self._update_metrics(batch, batch_idx, 'val')
-
-    def test_step(self, batch, batch_idx):
-        return self._update_metrics(batch, batch_idx, 'test')
-
-    def validation_epoch_end(self, outputs):
-        return self._compute_and_log_metric('val')
-
-    def test_epoch_end(self, outputs):
-        return self._compute_and_log_metric('test')

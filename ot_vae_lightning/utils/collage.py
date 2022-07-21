@@ -45,12 +45,11 @@ class Collage(Callback):
         for method in pl_module.collage_methods():
             inputs = pl_module.batch_preprocess(batch)
             img_list = getattr(pl_module, method)(inputs)
-            post_process = getattr(trainer.datamodule, f"{'train' if mode == 'train' else 'test'}_inverse_transform")
-            if len(img_list) == 0:
-                return
-            collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
+            if len(img_list) == 0: return
+            elif len(img_list) == 1: collage_tensor = img_list[0].clamp(0, 1)
+            else: collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
             collage = make_grid(collage_tensor[:min(collage_tensor.size(0), self.num_samples)], nrow=1)
-            trainer.logger.log_image(f'{mode}/collage', [collage], trainer.global_step, caption=method)
+            trainer.logger.log_image(f'{mode}/collage/{method}', [collage], trainer.global_step)
 
     def on_validation_batch_end(
         self,

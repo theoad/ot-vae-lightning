@@ -295,11 +295,11 @@ class CNN(nn.Sequential):
 
         self.out_size = torch.Size([out_features, out_resolution, out_resolution])
         super().__init__(
-            ConvLayer(features[0], features[1], equalized_lr=equalized_lr, kernel_size=1, padding=0),
+            ConvLayer(features[0], features[0], equalized_lr=equalized_lr, kernel_size=1, padding=0),
             *[ConvBlock(ic, oc, n_layers, down_sample, up_sample, normalization, activation, equalized_lr,
                         dropout, kernel_size, stride, padding, dilation, groups, bias, residual)
-              for ic, oc in zip(features[1:-2], features[2:-1])],
-            ConvLayer(features[-2], features[-1], equalized_lr=equalized_lr, kernel_size=1, padding=0)
+              for ic, oc in zip(features[:-1], features[1:])],
+            ConvLayer(features[-1], features[-1], equalized_lr=equalized_lr, kernel_size=1, padding=0)
         )
 
 
