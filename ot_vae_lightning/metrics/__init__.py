@@ -1,1 +1,1 @@
-from ot_vae_lightning.metrics.fid import FID
+from ot_vae_lightning.metrics.fid import FrechetInceptionDistance
