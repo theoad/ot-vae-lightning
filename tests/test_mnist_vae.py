@@ -24,8 +24,8 @@ from ot_vae_lightning.prior import GaussianPrior
 from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.networks import CNN, AutoEncoder
 
-_PSNR_PERFORMANCE = 14
-_MAX_EPOCH = 10
+_PSNR_PERFORMANCE = 13
+_MAX_EPOCH = 2
 
 
 def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):

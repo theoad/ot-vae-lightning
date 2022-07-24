@@ -113,15 +113,13 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
         """
         length = len(datasets[0])   # type: ignore[arg-type]
         for d in datasets:
-            assert (
-                len(d) == length,  # type: ignore[arg-type]
-                f"The datasets are expected to all have the same size. "
+            assert len(d) == length,\
+                f"The datasets are expected to all have the same size. "\
                 f"Found {length} and {len(d)}"  # type: ignore[arg-type]
-            )
 
         if isinstance(split, float):
-            if split >= 1 or split <= 0:
-                ValueError(f"The split probability must verify 0 < split_prob < 1. Given: {split}")
+            if split > 1 or split < 0:
+                raise ValueError(f"The split probability must verify 0 <= split_prob <= 1. Given: {split}")
 
             size = int(length * split)
             split = [size, length - size]

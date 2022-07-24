@@ -15,6 +15,7 @@ from typing import Tuple, Optional, Dict, List, Union
 
 import torch
 from torch import Tensor
+from torchvision.transforms.transforms import GaussianBlur
 import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning.callbacks import RichProgressBar
@@ -24,6 +25,7 @@ from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint, support_preprocess, support_postprocess
 from ot_vae_lightning.utils import Collage
+from ot_vae_lightning.ot import LatentTransport
 
 
 class VAE(BaseModule):
@@ -115,6 +117,7 @@ class VAE(BaseModule):
         z, prior_loss = self.encode(batch['samples'], return_prior_loss=True)
         x_hat = self.decode(z)
         batch['preds'] = x_hat
+        batch['latents'] = z
 
         prior_loss = prior_loss.mean()
         recon_loss = F.mse_loss(x_hat, x, reduction="none").sum(dim=(1, 2, 3)).mean()
@@ -180,9 +183,19 @@ class VAE(BaseModule):
 
 
 if __name__ == '__main__':
-    callbacks = [Collage(), RichProgressBar()]
+    callbacks = [Collage()]#, RichProgressBar()]
     cli = LightningCLI(VAE, MNIST,
                        trainer_defaults=dict(default_root_dir='.', callbacks=callbacks),
                        run=False, save_config_overwrite=True)
+    transport_callback = LatentTransport(
+        size=cli.model.latent_size,
+        transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+        transport_type="gaussian",
+        transport_dims=(1, 2, 3),
+        diag=True,
+        pg_star=0,
+        stochastic=False,
+    )
+    cli.trainer.callbacks += [transport_callback]
     cli.trainer.fit(cli.model, cli.datamodule)
     cli.trainer.test(cli.model, cli.datamodule)

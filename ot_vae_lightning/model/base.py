@@ -140,8 +140,9 @@ class BaseModule(pl.LightningModule, ABC):
         loss = self.loss[optimizer_idx] if hasattr(self.loss, '__getitem__') else self.loss
         loss, logs, pbatch = loss(self.batch_preprocess(batch), batch_idx)
         metric_result = self.train_metrics(pbatch['preds'], pbatch['targets'])
-        self.log_dict({**logs, **metric_result}, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
-        return loss
+        full_log = {**logs, **metric_result, 'loss': loss}
+        self.log_dict(full_log, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
+        return full_log
 
     def validation_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         return self._update_metrics(batch, batch_idx, 'val')

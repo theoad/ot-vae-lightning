@@ -19,6 +19,17 @@ from pytorch_lightning.utilities.types import STEP_OUTPUT
 from pytorch_lightning import Callback
 
 
+def list_to_collage(img_list, num_samples):
+    if len(img_list) == 0:
+        return
+    elif len(img_list) == 1:
+        collage_tensor = img_list[0].clamp(0, 1)
+    else:
+        collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
+    collage = make_grid(collage_tensor[:min(collage_tensor.size(0), num_samples)], nrow=1)
+    return collage
+
+
 class Collage(Callback):
     """
     `PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a collage callback
@@ -45,10 +56,7 @@ class Collage(Callback):
         for method in pl_module.collage_methods():
             inputs = pl_module.batch_preprocess(batch)
             img_list = getattr(pl_module, method)(inputs)
-            if len(img_list) == 0: return
-            elif len(img_list) == 1: collage_tensor = img_list[0].clamp(0, 1)
-            else: collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
-            collage = make_grid(collage_tensor[:min(collage_tensor.size(0), self.num_samples)], nrow=1)
+            collage = list_to_collage(img_list, self.num_samples)
             trainer.logger.log_image(f'{mode}/collage/{method}', [collage], trainer.global_step)
 
     def on_validation_batch_end(
@@ -61,7 +69,7 @@ class Collage(Callback):
         dataloader_idx: int,
     ) -> None:
         if batch_idx == 0 and trainer.is_global_zero:
-            self.log_images(trainer, pl_module, batch, 'test')
+            self.log_images(trainer, pl_module, batch, 'val')
 
     def on_test_batch_end(
         self,
@@ -73,7 +81,7 @@ class Collage(Callback):
         unused: Optional[int] = 0,
     ) -> None:
         if batch_idx == 0 and trainer.is_global_zero:
-            self.log_images(trainer, pl_module, batch, 'val')
+            self.log_images(trainer, pl_module, batch, 'tes')
 
     # def on_train_batch_end(
     #     self,
