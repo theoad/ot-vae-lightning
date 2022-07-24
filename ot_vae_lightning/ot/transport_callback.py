@@ -183,15 +183,19 @@ class LatentTransport(Callback):
         self._update_transport_operators(self._encode(pl_module, self.transformations(samples)), source=True)
 
     def on_validation_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+        if trainer.sanity_checking:
+            return
+
         mean_dist = sum([to.compute() for to in self.transport_operators]) / len(self.transport_operators)
         pl_module.log(self.logging_prefix + 'mean_distance', mean_dist)
 
-        samples = next(iter(trainer.train_dataloader))
+        samples = pl_module.batch_preprocess(next(iter(trainer.val_dataloaders[0])))[self.samples_key].to(pl_module.device)
         transformed = self.transformations(samples)
         latents = self._encode(pl_module, transformed)
         transformed_decoded = self._decode(pl_module, latents)
         samples_transported = self._decode(pl_module, self._transport(latents))
         img_list = [transformed, transformed_decoded, samples_transported, samples]
+
         collage = list_to_collage(img_list, min(samples.shape[0], 8))
         trainer.logger.log_image(self.logging_prefix + 'collage', [collage], trainer.global_step)
 
@@ -213,7 +217,7 @@ class LatentTransport(Callback):
         if self.samples_key not in outputs.keys():
             raise ValueError(f"""
             Usage of the {LatentTransport.__class__.__name__} callback demands that the pl_module which is training 
-            returns a dictionary in it's t`raining_step`, containing the key '{self.latents_key}' in which the image 
+            returns a dictionary in it's `training_step`, containing the key '{self.latents_key}' in which the image 
             samples' latent representation are located. Since no such key was found, the callback tries to find compute 
             the latent representation using the pl_module `encode` method and the image samples located at the key
             '{self.samples_key}'. Fatal: the key '{self.samples_key}' was not found in the output dictionary of the
@@ -243,7 +247,7 @@ class LatentTransport(Callback):
 
         return pl_module.decode(latents)
 
-    def _transport(self, latents):
+    def _transport(self, latents: Tensor) -> Tensor:
         permutation_map = list(range(latents.dim()))
         permutation_map[0] = len(self.operator_dim)
         for dim in range(1, latents.dim()):
@@ -253,15 +257,20 @@ class LatentTransport(Callback):
                 assert dim in self.transport_dims, f"Flow assertion error !!!"
                 len(self.operator_dim) + 1 + self.transport_dims.index(dim)
 
-        latents_rearranged = latents.permute(*self.operator_dim, 0, *self.transport_dims)
         if len(self.operator_dim) > 0:
+            latents_rearranged = latents.permute(*self.operator_dim, 0, *self.transport_dims)
             latents_rearranged = latents_rearranged.flatten(0, len(self.operator_dim) - 1)
+        else:
+            latents_rearranged = latents.unsqueeze(0)
         latents_transported = torch.stack([
             transport_operator.transport(latent)
             for latent, transport_operator in zip(latents_rearranged, self.transport_operators)
         ])
+
         if len(self.operator_dim) > 0:
             latents_transported = latents_transported.unflatten(0, [self.size[d - 1] for d in self.operator_dim])
+        else:
+            latents_transported = latents_transported.squeeze(0)
         latents_transported = latents_transported.permute(*permutation_map)
 
         assert latents_transported.shape == latents.shape, "Tensor shape assertion error !!!"

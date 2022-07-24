@@ -183,19 +183,54 @@ class VAE(BaseModule):
 
 
 if __name__ == '__main__':
-    callbacks = [Collage()]#, RichProgressBar()]
     cli = LightningCLI(VAE, MNIST,
-                       trainer_defaults=dict(default_root_dir='.', callbacks=callbacks),
+                       trainer_defaults=dict(default_root_dir='.'),
                        run=False, save_config_overwrite=True)
-    transport_callback = LatentTransport(
-        size=cli.model.latent_size,
-        transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
-        transport_type="gaussian",
-        transport_dims=(1, 2, 3),
-        diag=True,
-        pg_star=0,
-        stochastic=False,
-    )
-    cli.trainer.callbacks += [transport_callback]
+
+    callbacks = [
+        Collage(),
+        # RichProgressBar(),
+        LatentTransport(
+            size=cli.model.latent_size,
+            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transport_type="gaussian",
+            transport_dims=(1, 2, 3),
+            diag=True,
+            pg_star=0,
+            stochastic=False,
+            logging_prefix="transport/gaussian/diag_deterministic"
+        ),
+        LatentTransport(
+            size=cli.model.latent_size,
+            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transport_type="gaussian",
+            transport_dims=(1, 2, 3),
+            diag=False,
+            pg_star=0,
+            stochastic=False,
+            logging_prefix="transport/gaussian/full_deterministic"
+        ),
+        LatentTransport(
+            size=cli.model.latent_size,
+            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transport_type="gaussian",
+            transport_dims=(1, 2, 3),
+            diag=False,
+            pg_star=0,
+            stochastic=True,
+            logging_prefix="transport/gaussian/full_stochastic"
+        ),
+        LatentTransport(
+            size=cli.model.latent_size,
+            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transport_type="gaussian",
+            transport_dims=(1, 2, 3),
+            diag=True,
+            pg_star=0,
+            stochastic=True,
+            logging_prefix="transport/gaussian/diag_stochastic"
+        )
+    ]
+    cli.trainer.callbacks += callbacks
     cli.trainer.fit(cli.model, cli.datamodule)
     cli.trainer.test(cli.model, cli.datamodule)

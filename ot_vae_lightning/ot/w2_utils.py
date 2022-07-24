@@ -264,8 +264,9 @@ def apply_transport(
             raise ValueError(f"As vector, `Cw` should contain only positive values")
     # ------------------------------------------- END OF PARAMETER CHECKS -------------------------------------------- #
 
-    w = torch.zeros_like(Cw.size(0))
+    w = 0
     if Cw is not None:
+        w = torch.zeros_like(Cw.size(0))
         if diag:
             w = Normal(w, Cw).rsample()
         else:

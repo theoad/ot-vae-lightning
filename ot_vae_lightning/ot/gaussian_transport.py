@@ -40,6 +40,8 @@ class GaussianTransport(Metric):
 
     We inherit from torchmetrics.Metric class to automatically handle distributed synchronization.
     """
+    full_state_update = False
+
     def __init__(self,
                  dim: int,
                  diag: bool,
@@ -69,7 +71,10 @@ class GaussianTransport(Metric):
         self.add_state("n_obs_source", torch.zeros([], dtype=torch.int32), dist_reduce_fx='sum', persistent=persistent)
         self.add_state("n_obs_target", torch.zeros([], dtype=torch.int32), dist_reduce_fx='sum', persistent=persistent)
         self.add_state("transport_operator", mat_init.clone(), persistent=persistent)
-        self.add_state("cov_stochastic_noise", mat_init.clone(), persistent=persistent)
+        if self.stochastic:
+            self.add_state("cov_stochastic_noise", mat_init.clone(), persistent=persistent)
+        else:
+            self.cov_stochastic_noise = None
 
     def update(self, source_samples: Optional[Tensor] = None, target_samples: Optional[Tensor] = None) -> None:
         if source_samples is not None:
@@ -78,7 +83,7 @@ class GaussianTransport(Metric):
                 ValueError(f"`source_samples` flattened is expected to have dimensionality equaled to {self.dim}")
             self.n_obs_source += flattened.size(0)
             self.mean_source += flattened.sum(0)
-            self.cov_source += (flattened ** 2).sum(0) if self.diag else flattened.t().mm(flattened)
+            self.cov_source += (flattened ** 2).sum(0) if self.diag else flattened.mm(flattened.T)
 
         if target_samples is not None:
             flattened = target_samples.flatten(1).double()
@@ -86,7 +91,7 @@ class GaussianTransport(Metric):
                 ValueError(f"`target_samples` flattened is expected to have dimensionality equaled to {self.dim}")
             self.n_obs_target += flattened.size(0)
             self.mean_target += flattened.sum(0)
-            self.cov_target += (flattened ** 2).sum(0) if self.diag else flattened.t().mm(flattened)
+            self.cov_target += (flattened ** 2).sum(0) if self.diag else flattened.mm(flattened.T)
 
     def compute(self) -> Tensor:
         self.mean_source /= self.n_obs_source
@@ -94,7 +99,13 @@ class GaussianTransport(Metric):
         self.cov_source = self._compute_cov(self.cov_source, self.mean_source, self.n_obs_source)
         self.cov_target = self._compute_cov(self.cov_target, self.mean_target, self.n_obs_target)
 
-        w2 = w2_gaussian(self.mean_source, self.mean_target, self.cov_source, self.cov_target)
+        w2 = w2_gaussian(
+            self.mean_source,
+            self.mean_target,
+            torch.diag_embed(self.cov_source) if self.diag else self.cov_source,
+            torch.diag_embed(self.cov_target) if self.diag else self.cov_target
+        )
+
         self.transport_operator, self.cov_stochastic_noise = compute_transport_operators(
             self.cov_source,
             self.cov_target,
@@ -111,10 +122,10 @@ class GaussianTransport(Metric):
 
         transported = apply_transport(
             flattened,
-            self.mean_source,
-            self.mean_target,
-            self.transport_operator,
-            self.cov_stochastic_noise,
+            self.mean_source.type_as(flattened),
+            self.mean_target.type_as(flattened),
+            self.transport_operator.type_as(flattened),
+            self.cov_stochastic_noise.type_as(flattened) if self.cov_stochastic_noise is not None else None,
             self.diag
         )
 
