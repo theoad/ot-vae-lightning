@@ -10,7 +10,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='ot_vae_lightning',
-    version='0.1.0',
+    version='0.2.0',
     description='Implementation of Optimal Transport VAE',
     long_description=long_description,
     long_description_content_type="text/markdown",

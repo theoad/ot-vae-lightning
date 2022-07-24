@@ -1,0 +1,2 @@
+from ot_vae_lightning.ot.gaussian_transport import GaussianTransport
+from ot_vae_lightning.ot.transport_callback import LatentTransport
