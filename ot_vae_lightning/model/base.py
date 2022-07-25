@@ -29,11 +29,19 @@ class PartialCheckpoint:
         hparams, optimizer states, metric states and so on.
         This custom checkpoint loading method loads only weights for specific attributes.
     """
-    def __init__(self, checkpoint_path: str, attr_name: str = None, replace_str: str = "", strict: bool = True):
+    def __init__(
+            self,
+            checkpoint_path: str,
+            attr_name: str = None,
+            replace_str: str = "",
+            strict: bool = True,
+            freeze: bool = False
+    ):
         self.attr_name = attr_name
         self.checkpoint_path = checkpoint_path
         self.replace_str = replace_str
         self.strict = strict
+        self.freeze = freeze
         assert os.path.exists(checkpoint_path), f'Error: Path {checkpoint_path} not found.'
 
     @property
@@ -101,12 +109,10 @@ class BaseModule(pl.LightningModule, ABC):
         ----------------------------------------------------------------------------------------------------------------
 
         :param metrics: Metrics (torchmetrics.MetricCollection) to use for train, validation and test
-        :param checkpoints: Dictionary of attribute <-> Partial checkpoint (e.g. {'encoder': PartialCheckpoint}
+        :param checkpoints: Dictionary of: [attribute <-> Partial checkpoint]
+        (e.g. {'encoder': PartialCheckpoint('my_autoencoder_checkpoint', replace_str='autoencoder.encoder')})
         """
         super().__init__()
-        # as nn.Module, metrics are automatically saved on checkpointing, so we don't save them as hparams
-        self.save_hyperparameters()
-
         self.checkpoints = checkpoints
 
         self.loss = ...    # assign the loss function. (can be a list for alternate updates like GANs)
@@ -198,6 +204,9 @@ class BaseModule(pl.LightningModule, ABC):
             for attr, partial_ckpt in self.checkpoints.items():
                 getattr(self, attr).load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
                 print(f'[info]: self.{attr} loaded successfully')
+                if partial_ckpt.freeze:
+                    self.attr.freeze()
+                    print(f'[info]: self.{attr} parameters freezed')
 
     def _prepare_metrics(self, mode):
         for metric in getattr(self, f'{mode}_metrics').values():
@@ -245,7 +254,7 @@ class BaseModule(pl.LightningModule, ABC):
     @inference.setter
     def inference(self, boolean: bool):
         if boolean:
-            assert self.inference_preprocess is not None and self.inference_postprocess,\
+            assert self.inference_preprocess is not None and self.inference_postprocess is not None,\
                 'Tried to set model in inference mode but ' \
                 'self.inference_preprocess or self.inference_postprocess in None'
         self._inference_flag = boolean
