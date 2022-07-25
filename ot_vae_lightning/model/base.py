@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import pytorch_lightning as pl
+from pytorch_lightning.utilities.memory import get_model_size_mb
 from torchmetrics import MetricCollection
 
 
@@ -203,10 +204,7 @@ class BaseModule(pl.LightningModule, ABC):
         if self.checkpoints is not None:
             for attr, partial_ckpt in self.checkpoints.items():
                 getattr(self, attr).load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
-                print(f'[info]: self.{attr} loaded successfully')
-                if partial_ckpt.freeze:
-                    getattr(self, attr).freeze()
-                    print(f'[info]: self.{attr} parameters freezed')
+                print(f'[info]: self.{attr} loaded successfully. Model size: {get_model_size_mb(getattr(self, attr))}')
 
     def _prepare_metrics(self, mode):
         for metric in getattr(self, f'{mode}_metrics').values():
