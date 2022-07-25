@@ -29,12 +29,14 @@ class PartialCheckpoint:
         hparams, optimizer states, metric states and so on.
         This custom checkpoint loading method loads only weights for specific attributes.
     """
-    def __init__(self, checkpoint_path: str, attr_name: str = None, replace_str: str = ""):
+    def __init__(self, checkpoint_path: str, attr_name: str = None, replace_str: str = "", strict: bool = True):
         self.attr_name = attr_name
         self.checkpoint_path = checkpoint_path
         self.replace_str = replace_str
+        self.strict = strict
         assert os.path.exists(checkpoint_path), f'Error: Path {checkpoint_path} not found.'
 
+    @property
     def state_dict(self):
         checkpoint = torch.load(self.checkpoint_path)
         if self.attr_name is None or all([self.attr_name not in k for k in checkpoint['state_dict'].keys()]):
@@ -194,8 +196,7 @@ class BaseModule(pl.LightningModule, ABC):
         # Checkpoint loading. Let you load partial attributes.
         if self.checkpoints is not None:
             for attr, partial_ckpt in self.checkpoints.items():
-                state_dict = partial_ckpt.state_dict()
-                getattr(self, attr).load_state_dict(state_dict, strict=True)
+                getattr(self, attr).load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
                 print(f'[info]: self.{attr} loaded successfully')
 
     def _prepare_metrics(self, mode):
