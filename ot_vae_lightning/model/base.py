@@ -204,7 +204,7 @@ class BaseModule(pl.LightningModule, ABC):
         if self.checkpoints is not None:
             for attr, partial_ckpt in self.checkpoints.items():
                 getattr(self, attr).load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
-                print(f'[info]: self.{attr}[{int(get_model_size_mb(getattr(self, attr)))}Mb] loaded successfully.')
+                print(f'[info]: self.{attr}[{int(get_model_size_mb(getattr(self, attr)))}Mb - {human_format()}] loaded successfully.')
 
     def _prepare_metrics(self, mode):
         for metric in getattr(self, f'{mode}_metrics').values():
@@ -256,3 +256,12 @@ class BaseModule(pl.LightningModule, ABC):
                 'Tried to set model in inference mode but ' \
                 'self.inference_preprocess or self.inference_postprocess in None'
         self._inference_flag = boolean
+
+
+def human_format(num):
+    num = float('{:.3g}'.format(num))
+    magnitude = 0
+    while abs(num) >= 1000:
+        magnitude += 1
+        num /= 1000.0
+    return '{}{}'.format('{:f}'.format(num).rstrip('0').rstrip('.'), ['', 'K', 'M', 'B', 'T'][magnitude])
