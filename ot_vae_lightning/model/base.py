@@ -204,7 +204,7 @@ class BaseModule(pl.LightningModule, ABC):
         if self.checkpoints is not None:
             for attr, partial_ckpt in self.checkpoints.items():
                 getattr(self, attr).load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
-                print(f'[info]: self.{attr} loaded successfully. Model size: {get_model_size_mb(getattr(self, attr))}')
+                print(f'[info]: self.{attr}[{int(get_model_size_mb(getattr(self, attr)))}Mb] loaded successfully.')
 
     def _prepare_metrics(self, mode):
         for metric in getattr(self, f'{mode}_metrics').values():
