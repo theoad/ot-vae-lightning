@@ -205,7 +205,7 @@ class BaseModule(pl.LightningModule, ABC):
                 getattr(self, attr).load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
                 print(f'[info]: self.{attr} loaded successfully')
                 if partial_ckpt.freeze:
-                    self.attr.freeze()
+                    getattr(self, attr).freeze()
                     print(f'[info]: self.{attr} parameters freezed')
 
     def _prepare_metrics(self, mode):
