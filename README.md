@@ -47,14 +47,14 @@ from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
 from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import GaussianPrior
-from ot_vae_lightning.data import MNIST
+from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import CNN
 
 if __name__ == "__main__":
     seed_everything(42)
 
     trainer = Trainer(max_epochs=10, callbacks=RichProgressBar())
-    datamodule = MNIST(train_batch_size=250)
+    datamodule = MNIST32(train_batch_size=250)
 
     in_channels, in_resolution = 1, 32  # MNISTDatamodule pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]

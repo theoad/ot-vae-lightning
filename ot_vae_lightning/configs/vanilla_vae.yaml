@@ -9,10 +9,10 @@ model:
     init_args:
       in_features: 1
       in_resolution: 32
-      latent_features: 128
-      latent_resolution: 1
+      latent_features: 64
+      latent_resolution: 4
       double_encoded_features: true
-      capacity: 8
+      capacity: 4
       n_layers: 2
       down_up_sample: 2
       normalization: batchnorm

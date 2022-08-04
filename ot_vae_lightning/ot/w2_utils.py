@@ -13,11 +13,11 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 """
 from math import sqrt
 import torch
-from torch import Tensor
+from torch import Tensor, logical_not
 from typing import Tuple, Optional
 from torch.distributions.multivariate_normal import MultivariateNormal
 from torch.distributions import Normal
-
+import warnings
 from ot_vae_lightning.ot.matrix_utils import *
 
 __all__ = [
@@ -40,6 +40,7 @@ def compute_transport_operators(
         stochastic: bool,
         diag: bool,
         pg_star: float = 0,
+        make_pd: bool = False
 ) -> Tuple[Tensor, Optional[Tensor]]:
     r"""
     Batch implementation of eq. 17, 19 in [1]
@@ -65,6 +66,7 @@ def compute_transport_operators(
     :param diag: If ``True`` expects cov_source and cov_target to be batch of vectors (representing diagonal matrices)
     :param pg_star: Perception-distortion ratio. can be seen as temperature.
      (`p_gstar=0` --> best perception, `p_gstar=1` --> best distortion). Default `0`.
+    :param make_pd: Add the minimum eigenvalue in order to make matrices pd, if needed
 
     :return: Batch of transport operators T_{s -> t} and \Sigma_w
     """
@@ -150,42 +152,54 @@ def compute_transport_operators(
 
         if stochastic:
             if not is_spsd(cov_source).all():
-                raise ValueError(f"""
-                `diag`=False, `stochastic`=True: In this configuration, `cov_source` should be a batch of symmetric and
-                positive semi-definite matrices. Found {(torch.logical_not(is_spsd(cov_source))).count_nonzero().item()}
-                matrices in the batch that are not SPSD.
-                """)
+                if make_pd:
+                    cov_source = make_psd(cov_source)
+                else:
+                    raise ValueError(f"""
+                    `diag`=False, `stochastic`=True: In this configuration, `cov_source` should be a batch of symmetric 
+                    and positive semi-definite matrices. Found {(logical_not(is_spsd(cov_source))).count_nonzero().item()}
+                    matrices in the batch that are not SPSD. In order to add small value to the matrices diagonal use 
+                    `make_pd`=True.
+                    """)
             if not is_spd(cov_target).all():
-                raise ValueError(f"""
-                `diag`=False, `stochastic`=True: In this configuration, `cov_target` should be a batch of symmetric and
-                positive definite matrices. Found {(torch.logical_not(is_spd(cov_target))).count_nonzero().item()}
-                matrices in the batch that are not SPD.
-                """)
+                if make_pd:
+                    cov_target = make_psd(cov_target, strict=True)
+                else:
+                    raise ValueError(f"""
+                    `diag`=False, `stochastic`=True: In this configuration, `cov_target` should be a batch of symmetric 
+                    and positive definite matrices. Found {(logical_not(is_spd(cov_target))).count_nonzero().item()}
+                    matrices in the batch that are not SPD. In order to add small value to the matrices diagonal use 
+                    `make_pd`=True.
+                    """)
         else:
             if not is_spd(cov_source).all():
-                raise ValueError(f"""
-                `diag`=False, `stochastic`=False: In this configuration, `cov_source` should be a batch of symmetric and
-                positive definite matrices. Found {(torch.logical_not(is_spd(cov_source))).count_nonzero().item()}
-                matrices in the batch that are not SPD.
-                """)
+                if make_pd:
+                    cov_source = make_psd(cov_source, strict=True)
+                else:
+                    raise ValueError(f"""
+                    `diag`=False, `stochastic`=False: In this configuration, `cov_source` should be a batch of symmetric and
+                    positive definite matrices. Found {(logical_not(is_spd(cov_source))).count_nonzero().item()}
+                    matrices in the batch that are not SPD. In order to add small value to the matrices diagonal use 
+                    `make_pd`=True.
+                    """)
             if not is_spsd(cov_target).all():
-                raise ValueError(f"""
-                `diag`=False, `stochastic`=False: In this configuration, `cov_target` should be a batch of symmetric and
-                positive semi-definite matrices. Found {(torch.logical_not(is_spsd(cov_target))).count_nonzero().item()}
-                matrices in the batch that are not SPSD.
-                """)
+                if make_pd:
+                    cov_source = make_psd(cov_target)
+                else:
+                    raise ValueError(f"""
+                    `diag`=False, `stochastic`=False: In this configuration, `cov_target` should be a batch of symmetric
+                    and positive semi-definite matrices. Found {(logical_not(is_spsd(cov_target))).count_nonzero().item()}
+                    matrices in the batch that are not SPSD. In order to add small value to the matrices diagonal use 
+                    `make_pd`=True.
+                    """)
     # ------------------------------------------- END OF PARAMETER CHECKS -------------------------------------------- #
 
     if diag:
-        if stochastic:
-            T, Cw = _compute_transport_diag_stochastic(cov_source, cov_target, pg_star)
-        else:
-            T, Cw = _compute_transport_diag(cov_source, cov_target, pg_star)
+        if stochastic: T, Cw = _compute_transport_diag_stochastic(cov_source, cov_target, pg_star)
+        else: T, Cw = _compute_transport_diag(cov_source, cov_target, pg_star)
     else:
-        if stochastic:
-            T, Cw = _compute_transport_full_mat_stochastic(cov_source, cov_target, pg_star)
-        else:
-            T, Cw = _compute_transport_full_mat(cov_source, cov_target, pg_star)
+        if stochastic: T, Cw = _compute_transport_full_mat_stochastic(cov_source, cov_target, pg_star)
+        else: T, Cw = _compute_transport_full_mat(cov_source, cov_target, pg_star)
 
     T = T.squeeze(0) if squeeze else T
     Cw = Cw.squeeze(0) if squeeze and Cw is not None else Cw
@@ -243,40 +257,36 @@ def apply_transport(
     if not diag and T.dim() != 2:
         raise ValueError(f"`diag`=False: `T` should be a 2-dim matrix, got T.dim()={T.dim()}")
     if mean_source.size(0) != input.size(1):
-        raise ValueError(f"`mean_source` should have the same dimensionality as `input`, got {mean_source.size(0)}"
-                         f" and {input.size(1)}")
+        raise ValueError(f""" `mean_source` should have the same dimensionality as `input`, 
+        got {mean_source.size(0)} and {input.size(1)}""")
     if T.size(-1) != input.size(1):
         raise ValueError(f"`T` should have the same dimensionality as `input`, got {T.size(-1)} and {input.size(1)}")
     if T.size(0) != mean_target.size(0):
-        raise ValueError(f"`mean_target` should have the same dimensionality as `T`'s first dimension, got {T.size(0)}"
-                         f" and {mean_target.size(0)}")
+        raise ValueError(f"""`mean_target` should have the same dimensionality as `T`'s first dimension, 
+        got {T.size(0)} and {mean_target.size(0)}""")
     if Cw is not None:
         if diag and Cw.dim() != 1:
             raise ValueError(f"`diag`=True: `Cw` should be a 1-dim vector, got Cw.dim()={Cw.dim()}")
         if not diag and Cw.dim() != 2:
             raise ValueError(f"`diag`=False: `Cw` should be a 2-dim matrix, got Cw.dim()={Cw.dim()}")
         if Cw.size(0) != T.size(0):
-            raise ValueError(f"`Cw` should have the same dimensionality as `T`'s first dimension,"
-                             f" got {T.size(0)} and {Cw.size(0)}")
-        if Cw.dim() == 2 and not is_spd(Cw):
+            raise ValueError(f"""`Cw` should have the same dimensionality as `T`'s first dimension, 
+            got {T.size(0)} and {Cw.size(0)}""")
+        if Cw.dim() == 2 and not is_spsd(Cw):
             raise ValueError(f"As matrix, `Cw` should be a symmetric and positive definite")
-        if Cw.dim() == 1 and (Cw <= 0).any():
+        if Cw.dim() == 1 and (Cw < 0).any():
             raise ValueError(f"As vector, `Cw` should contain only positive values")
     # ------------------------------------------- END OF PARAMETER CHECKS -------------------------------------------- #
 
     w = 0
     if Cw is not None:
-        w = torch.zeros_like(Cw.size(0))
-        if diag:
-            w = Normal(w, Cw).rsample()
-        else:
-            w = MultivariateNormal(w, Cw).rsample()
+        w = torch.zeros_like(mean_target)
+        if diag: w = Normal(w, Cw).rsample()
+        else: w = MultivariateNormal(w, Cw).rsample()
 
     x_centered = input - mean_source
-    if diag:
-        x_transported = T * x_centered
-    else:
-        x_transported = torch.matmul(T, x_centered.T).T
+    if diag: x_transported = T * x_centered
+    else: x_transported = torch.matmul(T, x_centered.T).T
 
     x_transported = x_transported + mean_target + w
     return x_transported
@@ -289,40 +299,70 @@ def w2_gaussian(
         mean_source: Tensor,
         mean_target: Tensor,
         cov_source: Tensor,
-        cov_target: Tensor
+        cov_target: Tensor,
+        make_pd: bool = False
 ) -> Tensor:
     """
-    Computes closed form squared W2 distance between Gaussians
+    Computes closed form squared W2 distance between Gaussian distributions (also known as Gelbrich Distance)
     :param mean_source: A 1-dim vectors representing the source distribution mean
     :param mean_target: A 1-dim vectors representing the target distribution mean
     :param cov_source: A 2-dim matrix representing the source distribution covariance
     :param cov_target: A 2-dim matrix representing the target distribution covariance
+    :param make_pd: Add the minimum eigenvalue in order to make matrices pd, if needed
     :return: The squared Wasserstein 2 distance between N(mean_source, cov_source) and N(mean_target, cov_target)
     """
     if mean_source.dim() != 1:
-        raise ValueError(f"`mean_source` should be a 1-dim vectors representing the source distribution mean,"
-                         f" got mean_source.dim()={mean_source.dim()}")
+        raise ValueError(f"""
+        `mean_source` should be a 1-dim vectors representing the source distribution mean, got
+         mean_source.dim()={mean_source.dim()}
+        """)
+
     if mean_target.dim() != 1:
-        raise ValueError(f"`mean_target` should be a 1-dim vectors representing the target distribution mean,"
-                         f" got mean_source.dim()={mean_target.dim()}")
+        raise ValueError(f"""
+        `mean_target` should be a 1-dim vectors representing the target distribution mean, got
+         mean_target.dim()={mean_target.dim()}
+         """)
+
     if cov_source.dim() != 2:
-        raise ValueError(f"`cov_source` should be a 2-dim matrix representing the source distribution covariance,"
-                         f" got cov_source.dim()={cov_source.dim()}")
+        raise ValueError(f"""
+        `cov_source` should be a 2-dim matrix representing the source distribution covariance, got
+         cov_source.dim()={cov_source.dim()}
+         """)
+
     if cov_target.dim() != 2:
-        raise ValueError(f"`cov_target` should be a 2-dim matrix representing the target distribution covariance,"
-                         f" got cov_target.dim()={cov_target.dim()}")
-    if not (mean_source.size(0) == mean_source.size(0) == cov_source.size(0) == cov_source.size(1) == cov_target.size(0) == cov_target.size(1)):
-        raise ValueError(f"All the inputs dimensions should match,"
-                         f" got {mean_source.size(0)}, {mean_source.size(0)}, {cov_source.size(0)}, {cov_source.size(1)}"
-                         f", {cov_target.size(0)}, {cov_target.size(1)}")
+        raise ValueError(f"""
+        `cov_target` should be a 2-dim matrix representing the target distribution covariance, got
+         cov_target.dim()={cov_target.dim()}
+         """)
+
+    if not (mean_source.size(0) == mean_source.size(0) == cov_source.size(0) ==
+            cov_source.size(1) == cov_target.size(0) == cov_target.size(1)):
+        raise ValueError(f"""
+        All the inputs dimensions should match, got {mean_source.size(0)}, {mean_source.size(0)}, {cov_source.size(0)},
+        {cov_source.size(1)}, {cov_target.size(0)}, {cov_target.size(1)}
+        """)
+
     if not is_spsd(cov_source):
-        raise ValueError("`cov_source` should be symmetric and positive semi-definite")
+        if make_pd:
+            make_psd(cov_source)
+        else:
+            raise ValueError("`cov_source` should be symmetric and positive semi-definite")
     if not is_spsd(cov_target):
-        raise ValueError("`cov_target` should be symmetric and positive semi-definite")
+        if make_pd:
+            make_psd(cov_target)
+        else:
+            raise ValueError("`cov_target` should be symmetric and positive semi-definite")
     cov_target_sqrt = sqrtm(cov_target)
+    mix = cov_target_sqrt @ cov_source @ cov_target_sqrt
+    if not is_spsd(mix):
+        warnings.warn(f"""
+        cov_target_sqrt @ cov_source @ cov_target_sqrt is not positive definite. Adding a small value to the diagonal
+        (<{min_eig(mix).abs().max()}) to make the matrices positive definite
+        """)
+        mix = make_psd(mix)
     squared_w2 = (
             torch.linalg.vector_norm(mean_source - mean_target) ** 2 +
-            torch.trace(cov_source + cov_target - 2 * sqrtm(cov_target_sqrt @ cov_source @ cov_target_sqrt))
+            torch.trace(cov_source + cov_target - 2 * sqrtm(mix))
     )
     return squared_w2
 
@@ -560,7 +600,7 @@ def _compute_transport_diag_stochastic(
 
     T = (1 - p_gstar) * torch.sqrt(cov_target * cov_source) * pinv_source + p_gstar
     var_w = sqrt(1 - p_gstar) * cov_target * (1 - cov_target * pinv_source * T_star ** 2)
-    return T, var_w
+    return T, var_w + var_w.min().clamp(max=0).abs() + STABILITY_CONST
 
 # ******************************************************************************************************************** #
 
@@ -575,9 +615,8 @@ def _compute_transport_full_mat(
     This function doesn't have any parameter checking and was not designed to be standalone.
     Use with care.
     """
-    Identity = torch.eye(*cov_source.shape[1:2], out=torch.empty_like(cov_source))
-    sqrtCs, isqrtCs = sqrtm(cov_source), invsqrtm(cov_source + STABILITY_CONST * Identity)
-    T = (1 - p_gstar) * (isqrtCs @ sqrtm(sqrtCs @ cov_target @ sqrtCs) @ isqrtCs) + p_gstar * Identity
+    sqrtCs, isqrtCs = sqrtm(cov_source), invsqrtm(cov_source + STABILITY_CONST * eye_like(cov_source))
+    T = (1 - p_gstar) * (isqrtCs @ sqrtm(sqrtCs @ cov_target @ sqrtCs) @ isqrtCs) + p_gstar * eye_like(cov_source)
     return T, None
 
 
@@ -594,13 +633,13 @@ def _compute_transport_full_mat_stochastic(
     This function doesn't have any parameter checking and was not designed to be standalone.
     Use with care.
     """
-    Identity = torch.eye(*cov_source.shape[1:2], out=torch.empty_like(cov_source))
+    Identity = eye_like(cov_source)
     pinv_source = torch.linalg.pinv(cov_source)
     sqrt_target, inv_sqrt_target = sqrtm(cov_target), invsqrtm(cov_target + STABILITY_CONST * Identity)
 
     # Roles are swapped on purpose, cov_source might only be positive semi definite
-    T_star = _compute_transport_full_mat(cov_source=cov_target, cov_target=cov_source, p_gstar=0)
+    T_star = _compute_transport_full_mat(cov_source=cov_target, cov_target=cov_source, p_gstar=0)[0]
 
     T = (1-pg_star) * (sqrt_target @ sqrtm(sqrt_target @ cov_source @ sqrt_target) @ inv_sqrt_target @ pinv_source) + pg_star * Identity
     Cw = sqrt(1-pg_star) * sqrt_target @ (Identity - sqrt_target @ T_star @ pinv_source @ T_star @ sqrt_target) @ sqrt_target
-    return T, Cw
+    return T, make_psd(Cw, strict=True)

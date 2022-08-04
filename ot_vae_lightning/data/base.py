@@ -46,6 +46,7 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
                  val_batch_size: int = 256,
                  test_batch_size: int = 256,
                  predict_batch_size: int = 256,
+                 **dataloader_kwargs
                  ) -> None:
         """
         Lightning DataModule
@@ -65,7 +66,8 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
         :param num_workers: Number of CPUs available
         """
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['train_transform', 'val_transform', 'test_transform', 'predict_transform',
+                                          'inference_preprocess', 'inference_postprocess'])
         self.train_transform = train_transform
         self.val_transform = val_transform
         self.test_transform = test_transform
@@ -73,14 +75,20 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
         self.inference_preprocess = inference_preprocess
         self.inference_postprocess = inference_postprocess
         self.train_dataset, self.val_dataset, self.test_dataset, self.predict_dataset = None, None, None, None
+        self.dataloader_kwargs = dataloader_kwargs
 
     def _dataloader(self, mode: str):
+        kwargs = {
+            'num_workers': self.hparams.num_workers,
+            'pin_memory': True,  # must pin memory for DDP
+            'shuffle': True if mode == 'train' else False,
+            **self.dataloader_kwargs  # will override the params above
+        }
+
         return DataLoader(
             getattr(self, f'{mode}_dataset'),
             batch_size=getattr(self.hparams, f'{mode}_batch_size'),
-            num_workers=self.hparams.num_workers,
-            pin_memory=True,  # must pin memory for DDP
-            shuffle=True if mode == 'train' else False
+            **kwargs
         )
 
     def train_dataloader(self):
@@ -95,43 +103,43 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
     def predict_dataloader(self):
         return self._dataloader('predict')
 
-    @staticmethod
-    def _dataset_split(
-            datasets: Sequence[Dataset],
-            split: Union[Sequence[int], float] = 0.9,
-            seed: Optional[int] = None
-    ):
-        r"""
-        Randomly split a dataset into non-overlapping new datasets of given lengths.
-        Optionally fix the generator for reproducible results.
-        Adapted from torch.utils.data.random_split to allow for different transform in each split
 
-        Args:
-            datasets (sequence of Dataset): Datasets to be split
-            split (sequence, float): sequence of length or proportion of splits (for a 2-fold split)
-            seed (int): seed used for the random permutation reproducibility.
-        """
-        length = len(datasets[0])   # type: ignore[arg-type]
-        for d in datasets:
-            assert len(d) == length,\
-                f"The datasets are expected to all have the same size. "\
-                f"Found {length} and {len(d)}"  # type: ignore[arg-type]
+def dataset_split(
+        datasets: Sequence[Dataset],
+        split: Union[Sequence[int], float] = 0.9,
+        seed: Optional[int] = None
+):
+    r"""
+    Randomly split a dataset into non-overlapping new datasets of given lengths.
+    Optionally fix the generator for reproducible results.
+    Adapted from torch.utils.data.random_split to allow for different transform in each split
 
-        if isinstance(split, float):
-            if split > 1 or split < 0:
-                raise ValueError(f"The split probability must verify 0 <= split_prob <= 1. Given: {split}")
+    Args:
+        datasets (sequence of Dataset): Datasets to be split
+        split (sequence, float): sequence of length or proportion of splits (for a 2-fold split)
+        seed (int): seed used for the random permutation reproducibility.
+    """
+    length = len(datasets[0])   # type: ignore[arg-type]
+    for d in datasets:
+        assert len(d) == length,\
+            f"The datasets are expected to all have the same size. "\
+            f"Found {length} and {len(d)}"  # type: ignore[arg-type]
 
-            size = int(length * split)
-            split = [size, length - size]
+    if isinstance(split, float):
+        if split > 1 or split < 0:
+            raise ValueError(f"The split probability must verify 0 <= split_prob <= 1. Given: {split}")
 
-        # Cannot verify that dataset is Sized
-        if sum(split) != length:  # type: ignore[arg-type]
-            raise ValueError(f"Sum of input lengths does not equal the length of the input datasets! "
-                             f"Given length={length} and split={split}")
+        size = int(length * split)
+        split = [size, length - size]
 
-        seed_generator = torch.Generator().manual_seed(seed) if seed is not None else None
-        indices = randperm(sum(split), generator=seed_generator).tolist()
-        return [
-            Subset(d, indices[offset - length: offset]) for d, offset, length in zip(datasets, accumulate(split), split)
-        ]
+    # Cannot verify that dataset is Sized
+    if sum(split) != length:  # type: ignore[arg-type]
+        raise ValueError(f"Sum of input lengths does not equal the length of the input datasets! "
+                         f"Given length={length} and split={split}")
+
+    seed_generator = torch.Generator().manual_seed(seed) if seed is not None else None
+    indices = randperm(sum(split), generator=seed_generator).tolist()
+    return [
+        Subset(d, indices[offset - length: offset]) for d, offset, length in zip(datasets, accumulate(split), split)
+    ]
 

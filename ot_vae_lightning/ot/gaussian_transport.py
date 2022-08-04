@@ -47,7 +47,8 @@ class GaussianTransport(Metric):
                  diag: bool,
                  pg_star: float = 0.,
                  stochastic: bool = False,
-                 persistent: bool = True
+                 persistent: bool = True,
+                 make_pd: bool = True
                  ):
         r"""
         :param dim: The dimensionality of the distributions to transport
@@ -55,12 +56,14 @@ class GaussianTransport(Metric):
         :param pg_star: Perception-distortion ratio. can be seen as temperature.
         :param stochastic: If ``True`` return (T_{s -> t}, \Sigma_w) of (19) else return (T_{s -> t}, `None`) (17)
         :param persistent: whether the buffers are part of this module's :attr:`state_dict`.
+        :param make_pd: Add the minimum eigenvalue in order to make matrices pd, if needed
         """
         super().__init__(dist_sync_on_step=False, full_state_update=False)
         self.dim = dim
         self.diag = diag
         self.pg_star = pg_star
         self.stochastic = stochastic
+        self.make_pd = make_pd
 
         vec_init = torch.zeros(self.dim, dtype=torch.double)
         mat_init = vec_init if diag else torch.zeros(self.dim, self.dim, dtype=torch.double)
@@ -68,51 +71,64 @@ class GaussianTransport(Metric):
         self.add_state("mean_target", vec_init.clone(), dist_reduce_fx='sum', persistent=persistent)
         self.add_state("cov_source", mat_init.clone(), dist_reduce_fx='sum', persistent=persistent)
         self.add_state("cov_target", mat_init.clone(), dist_reduce_fx='sum', persistent=persistent)
-        self.add_state("n_obs_source", torch.zeros([], dtype=torch.int32), dist_reduce_fx='sum', persistent=persistent)
-        self.add_state("n_obs_target", torch.zeros([], dtype=torch.int32), dist_reduce_fx='sum', persistent=persistent)
+        self.add_state("n_obs_source", torch.zeros([], dtype=torch.long), dist_reduce_fx='sum', persistent=persistent)
+        self.add_state("n_obs_target", torch.zeros([], dtype=torch.long), dist_reduce_fx='sum', persistent=persistent)
         self.add_state("transport_operator", mat_init.clone(), persistent=persistent)
-        if self.stochastic:
-            self.add_state("cov_stochastic_noise", mat_init.clone(), persistent=persistent)
-        else:
-            self.cov_stochastic_noise = None
+        if self.stochastic: self.add_state("cov_stochastic_noise", mat_init.clone(), persistent=persistent)
+        else: self.cov_stochastic_noise = None
 
     def update(self, source_samples: Optional[Tensor] = None, target_samples: Optional[Tensor] = None) -> None:
+        # noinspection Duplicates
         if source_samples is not None:
             flattened = source_samples.flatten(1).double()
             if flattened.size(1) != self.dim:
                 ValueError(f"`source_samples` flattened is expected to have dimensionality equaled to {self.dim}")
             self.n_obs_source += flattened.size(0)
             self.mean_source += flattened.sum(0)
-            self.cov_source += (flattened ** 2).sum(0) if self.diag else flattened.mm(flattened.T)
+            self.cov_source += (flattened ** 2).sum(0) if self.diag else flattened.T.mm(flattened)
 
+        # noinspection Duplicates
         if target_samples is not None:
             flattened = target_samples.flatten(1).double()
             if flattened.size(1) != self.dim:
                 ValueError(f"`target_samples` flattened is expected to have dimensionality equaled to {self.dim}")
             self.n_obs_target += flattened.size(0)
             self.mean_target += flattened.sum(0)
-            self.cov_target += (flattened ** 2).sum(0) if self.diag else flattened.mm(flattened.T)
+            self.cov_target += (flattened ** 2).sum(0) if self.diag else flattened.T.mm(flattened)
 
     def compute(self) -> Tensor:
         self.mean_source /= self.n_obs_source
         self.mean_target /= self.n_obs_target
-        self.cov_source = self._compute_cov(self.cov_source, self.mean_source, self.n_obs_source)
-        self.cov_target = self._compute_cov(self.cov_target, self.mean_target, self.n_obs_target)
+        self.cov_source /= self.n_obs_source
+        self.cov_target /= self.n_obs_target
+
+        if self.diag:
+            self.cov_source -= self.mean_source ** 2
+            self.cov_target -= self.mean_target ** 2
+        else:
+            self.cov_source -= self.mean_source.unsqueeze(-1) @ self.mean_source.unsqueeze(0)
+            self.cov_target -= self.mean_target.unsqueeze(-1) @ self.mean_target.unsqueeze(0)
 
         w2 = w2_gaussian(
             self.mean_source,
             self.mean_target,
             torch.diag_embed(self.cov_source) if self.diag else self.cov_source,
-            torch.diag_embed(self.cov_target) if self.diag else self.cov_target
+            torch.diag_embed(self.cov_target) if self.diag else self.cov_target,
+            make_pd=self.make_pd
         )
 
-        self.transport_operator, self.cov_stochastic_noise = compute_transport_operators(
+        transport_operator, cov_noise = compute_transport_operators(
             self.cov_source,
             self.cov_target,
             stochastic=self.stochastic,
             diag=self.diag,
-            pg_star=self.pg_star
+            pg_star=self.pg_star,
+            make_pd=self.make_pd
         )
+
+        self.transport_operator.data = transport_operator
+        if self.cov_stochastic_noise is not None and cov_noise is not None:
+            self.cov_stochastic_noise.data = cov_noise
         return w2
 
     def transport(self, inputs: Tensor) -> Tensor:
@@ -130,7 +146,3 @@ class GaussianTransport(Metric):
         )
 
         return transported.to(dtype=inputs.dtype).unflatten(1, inputs.shape[1:])
-
-    def _compute_cov(self, cov_sum, mean, n):
-        return cov_sum / n - mean ** 2 if self.diag else \
-            (1. / (n - 1.)) * cov_sum - (n / (n - 1.)) * mean.unsqueeze(1).mm(mean.unsqueeze(0))

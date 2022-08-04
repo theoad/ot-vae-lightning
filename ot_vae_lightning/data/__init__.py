@@ -1,5 +1,5 @@
 import torchvision.transforms as T
-from ot_vae_lightning.data.base import BaseDatamodule
+from ot_vae_lightning.data.base import BaseDatamodule, dataset_split
 from ot_vae_lightning.data.torchvision_datamodule import TorchvisionDatamodule
 from ot_vae_lightning.utils import UnNormalize, ToTensor
 
@@ -15,9 +15,26 @@ class MNIST(TorchvisionDatamodule):
             dataset_name='MNIST',
             root='~/.cache',
             download=True,
-            train_transform=T.Compose([ToTensor(), MNIST._normalize, T.Pad(2)]),
-            inference_preprocess=T.Compose([MNIST._normalize, T.Pad(2)]),
-            inference_postprocess=T.Compose([T.CenterCrop(28), MNIST._denormalize])
+            train_transform=T.Compose([ToTensor(), MNIST._normalize]),
+            inference_preprocess=T.Compose([MNIST._normalize]),
+            inference_postprocess=T.Compose([MNIST._denormalize])
+        )
+
+
+class MNIST32(TorchvisionDatamodule):
+    _mean, _std = (0.1307,), (0.3081,)
+    _normalize = T.Normalize(_mean, _std)
+    _denormalize = UnNormalize(_mean, _std)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(
+            *args, **kwargs,
+            dataset_name='MNIST',
+            root='~/.cache',
+            download=True,
+            train_transform=T.Compose([ToTensor(), MNIST32._normalize, T.Pad(2)]),
+            inference_preprocess=T.Compose([MNIST32._normalize, T.Pad(2)]),
+            inference_postprocess=T.Compose([T.CenterCrop(28), MNIST32._denormalize])
         )
 
 

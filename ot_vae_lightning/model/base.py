@@ -54,12 +54,12 @@ class PartialCheckpoint:
         state_dict = OrderedDict()
         for key in checkpoint['state_dict'].keys():
             if self.attr_name == '.'.join(key.split('.')[:self.attr_name.count('.')+1]):
-                state_dict[key.replace(f"{self.attr_name}.", self.replace_str)] = checkpoint['state_dict'][key]
+                state_dict[key.replace(f"{self.attr_name}.", self.replace_str, 1)] = checkpoint['state_dict'][key]
 
         return state_dict
 
 
-def support_preprocess(method):
+def inference_preprocess(method):
     @functools.wraps(method)
     def preprocess(self, samples, *args, no_preprocess_override=False, **kwargs):
         if self.inference and not no_preprocess_override:
@@ -68,7 +68,7 @@ def support_preprocess(method):
     return preprocess
 
 
-def support_postprocess(method):
+def inference_postprocess(method):
     @functools.wraps(method)
     def postprocess(self, *args, no_postprocess_override=False, **kwargs):
         out = method(self, *args, **kwargs)
@@ -92,6 +92,7 @@ class BaseModule(pl.LightningModule, ABC):
             self,
             metrics: Optional[MetricCollection] = None,
             checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
+            metric_on_train: bool = False
     ):
         """
         ----------------------------------------------------------------------------------------------------------------
@@ -111,16 +112,19 @@ class BaseModule(pl.LightningModule, ABC):
 
         :param metrics: Metrics (torchmetrics.MetricCollection) to use for train, validation and test
         :param checkpoints: Dictionary of: [attribute <-> Partial checkpoint]
-        (e.g. {'encoder': PartialCheckpoint('my_autoencoder_checkpoint', replace_str='autoencoder.encoder')})
+                            (e.g. {'encoder': PartialCheckpoint('my_encoder_checkpoint', replace_str='encoder')})
+        :param metric_on_train: If ``True``, will duplicate the validation/test metrics and use the synchronized
+                                per-step metric computation feature of torchmetrics
+                                (TL;DR: call `forward` on self.train_metrics).
         """
         super().__init__()
         self.checkpoints = checkpoints
 
         self.loss = ...    # assign the loss function. (can be a list for alternate updates like GANs)
 
-        self.train_metrics = metrics.clone(prefix='train/metrics/') if metrics is not None else None
         self.val_metrics = metrics.clone(prefix='val/metrics/') if metrics is not None else None
         self.test_metrics = metrics.clone(prefix='test/metrics/') if metrics is not None else None
+        self.train_metrics = metrics.clone(prefix='train/metrics/') if metrics is not None and metric_on_train else None
 
         self.inference_preprocess = None  # to be populated by checkpoint loading
         self.inference_postprocess = None  # to be populated by checkpoint loading
@@ -136,8 +140,8 @@ class BaseModule(pl.LightningModule, ABC):
         """
         pass
 
-    @support_preprocess
-    @support_postprocess
+    @inference_preprocess
+    @inference_postprocess
     @abstractmethod
     def forward(self, *args, **kwargs) -> Any:
         """
@@ -148,10 +152,11 @@ class BaseModule(pl.LightningModule, ABC):
     def training_step(self, batch, batch_idx, optimizer_idx=0):
         loss = self.loss[optimizer_idx] if hasattr(self.loss, '__getitem__') else self.loss
         loss, logs, pbatch = loss(self.batch_preprocess(batch), batch_idx)
-        metric_result = self.train_metrics(pbatch['preds'], pbatch['targets'])
-        full_log = {**logs, **metric_result, 'loss': loss}
-        self.log_dict(full_log, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
-        return {**full_log, **pbatch}
+        if self.train_metrics is not None:
+            metric_result = self.train_metrics(pbatch['preds'], pbatch['targets'])
+            logs = {**logs, **metric_result}
+        self.log_dict(logs, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
+        return {'loss': loss, **logs, **pbatch}
 
     def validation_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         return self._update_metrics(batch, batch_idx, 'val')
@@ -200,26 +205,37 @@ class BaseModule(pl.LightningModule, ABC):
         pass
 
     def setup(self, stage=None):
-        # Checkpoint loading. Let you load partial attributes.
         if self.checkpoints is not None:
             for attr, partial_ckpt in self.checkpoints.items():
-                getattr(self, attr).load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
-                print(f'[info]: self.{attr} [{human_format(sum(p.numel() for p in getattr(self, attr).parameters()))} '
-                      f'parameters - {int(get_model_size_mb(getattr(self, attr)))}Mb]')
+                self.load_attribute(attr, partial_ckpt)
+
+    def load_attribute(self, attr: str, partial_ckpt: PartialCheckpoint):
+        module = getattr(self, attr)
+        module.load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
+        if partial_ckpt.freeze:
+            for p in module.parameters():
+                p.requires_grad = False
+            module.eval()
+        print(f'[info]: self.{attr} [{human_format(sum(p.numel() for p in module.parameters()))} '
+              f'parameters - {int(get_model_size_mb(module))}Mb] loaded successfully '
+              f'{"and freezed" if partial_ckpt.freeze else ""}')
 
     def _prepare_metrics(self, mode):
+        if getattr(self, f'{mode}_metrics') is None: return
         for metric in getattr(self, f'{mode}_metrics').values():
             if hasattr(metric, 'prepare_metric'):
                 metric.prepare_metric(self)
                 self.print(f'{mode}_{metric} preparation done')
 
     def _update_metrics(self, batch, batch_idx, mode):
+        if getattr(self, f'{mode}_metrics') is None: return
         pbatch = self.batch_preprocess(batch)
         pbatch['preds'] = self(pbatch['samples'])
         getattr(self, f'{mode}_metrics').update(pbatch['preds'], pbatch['targets'])
         return pbatch
 
     def _compute_and_log_metric(self, mode):
+        if getattr(self, f'{mode}_metrics') is None: return
         res = getattr(self, f'{mode}_metrics').compute()
         getattr(self, f'{mode}_metrics').reset()
         self.log_dict(res, sync_dist=True, prog_bar=True, logger=True)
@@ -255,7 +271,7 @@ class BaseModule(pl.LightningModule, ABC):
         if boolean:
             assert self.inference_preprocess is not None and self.inference_postprocess is not None,\
                 'Tried to set model in inference mode but ' \
-                'self.inference_preprocess or self.inference_postprocess in None'
+                'self.inference_preprocess or self.inference_postprocess is None'
         self._inference_flag = boolean
 
 

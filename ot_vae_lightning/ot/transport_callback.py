@@ -61,7 +61,8 @@ class LatentTransport(Callback):
                  latents_key: str = 'latents',
                  logging_prefix: Optional[str] = None,
                  transformed_latents_from_train: bool = False,
-                 silence_warning: bool = False
+                 silence_warning: bool = False,
+                 num_samples_to_log: int = 8,
                  ) -> None:
         r"""
         :param size: The size of the Tensors to transport
@@ -69,11 +70,11 @@ class LatentTransport(Callback):
         :param transport_type: The transport operator type. Choices are `LatentTransport.TRANSPORT_CHOICE`.
         :param transport_dims: The dimension on which to apply the transport. Examples
          If (1, 2, 3), will transport the input vectors as a whole.
-         If (1,) and the tensor is an image, will transport each needle (pixel) individually.
-         if (2, 3) and the tensor is an image, will transport each channel individually.
+         If (1,), will transport each needle (pixel) individually.
+         if (2, 3), will transport each channel individually.
         :param diag: If ``True`` will suppose the samples come from isotropic distributions (with diagonal covariance)
-        :param pg_star: Perception-distortion ratio. can be seen as temperature.
-        :param stochastic: If ``True`` return (T_{s -> t}, \Sigma_w) of (19) else return (T_{s -> t}, `None`) (17)
+        :param pg_star: Perception-distortion ratio. Must be a float in [0, 1] can be seen as inverse temperature.
+        :param stochastic: If ``True`` will add stochasticity to the output (if applicable).
         :param persistent: whether the state buffers (transport operators) should be saved when checkpointing.
         :param samples_key: The key in which are stored the image samples on which to test the transport, in the
          dictionary returned from the `training_step` of the pytorch-lightning module jointly trained with this callback
@@ -85,6 +86,7 @@ class LatentTransport(Callback):
          samples to update the transport operators. This is unadvised since it will slow down training and bias the
          transport experiment (as source and target samples will not come from unpaired distributions)
         :param silence_warning: If ``True`` disable warning verbose.
+        :param num_samples_to_log: Number of image samples to log.
         """
         super().__init__()
         if transport_type not in LatentTransport.TRANSPORT_CHOICE:
@@ -107,8 +109,9 @@ class LatentTransport(Callback):
 
         self.samples_key = samples_key
         self.latents_key = latents_key
-        self.logging_prefix = f'transport/{transformations.__class__.__name__}/' if logging_prefix is None else logging_prefix
+        self.logging_prefix = f'transport/{transport_type}/' if logging_prefix is None else logging_prefix
         self.silence_warning = silence_warning
+        self.num_samples_to_log = num_samples_to_log
 
         self.transport_operators = torch.nn.ModuleList([
             LatentTransport._CLS_TABLE[transport_type](
@@ -143,7 +146,7 @@ class LatentTransport(Callback):
                 rank_zero_warn(f"""
                 Usage of the {LatentTransport.__class__.__name__} callback will try to learn the distribution of the 
                 latent variables emitted by {pl_module.__class__.__name__} during training. The training latents are 
-                expected to be found the dictionary outputed by the `training_step` with the key {self.latents_key}. 
+                expected to be found the dictionary outputted by the `training_step` with the key {self.latents_key}. 
                 Since this key was not found, the callback will use the `encode` method of 
                 {pl_module.__class__.__name__} to compute the latents which might not be the desired behaviour and 
                 result in a performance hit. To silence this warning, pass `silence_warning=True` to the constructor 
@@ -186,26 +189,41 @@ class LatentTransport(Callback):
         if trainer.sanity_checking:
             return
 
-        mean_dist = sum([to.compute() for to in self.transport_operators]) / len(self.transport_operators)
-        pl_module.log(self.logging_prefix + 'mean_distance', mean_dist)
+        # Compute the transport cost distance
+        mean_dist = sum([t.compute() for t in self.transport_operators]) / len(self.transport_operators)
+        pl_module.log(self.logging_prefix + 'avg_transport_cost', mean_dist)
 
+        if self.num_samples_to_log <= 0:
+            return
+
+        # Get validation samples to log samples ~ \mathcal{X}
         samples = pl_module.batch_preprocess(next(iter(trainer.val_dataloaders[0])))[self.samples_key].to(pl_module.device)
+
+        # transform the sample to the source distribution transformed ~ \mathcal{Y}
         transformed = self.transformations(samples)
+
         latents = self._encode(pl_module, transformed)
         transformed_decoded = self._decode(pl_module, latents)
         samples_transported = self._decode(pl_module, self._transport(latents))
         img_list = [transformed, transformed_decoded, samples_transported, samples]
 
-        collage = list_to_collage(img_list, min(samples.shape[0], 8))
-        trainer.logger.log_image(self.logging_prefix + 'collage', [collage], trainer.global_step)
+        collage = list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
+        trainer.logger.log_image(self.logging_prefix, [collage], trainer.global_step)  # type: ignore[arg-type]
 
     def _update_transport_operators(self, latents: Tensor, source: bool) -> None:
         latents_rearranged = latents.permute(*self.operator_dim, 0, *self.transport_dims)
         if len(self.operator_dim) > 0:
             latents_rearranged = latents_rearranged.flatten(0, len(self.operator_dim) - 1)
+        else:
+            latents_rearranged = latents_rearranged.unsqueeze(0)
         key = 'source_samples' if source else 'target_samples'
-        for latent, transport_operator in zip(latents_rearranged, self.transport_operators):
-            transport_operator.update(**{key: latent.to(transport_operator.device)})
+        try:
+            for latent, transport_operator in zip(latents_rearranged, self.transport_operators):
+                transport_operator.update(**{key: latent.to(transport_operator.device)})
+        except:
+            import IPython;
+            IPython.embed();
+            exit(1)
 
     def _get_samples(self, outputs: STEP_OUTPUT) -> Tensor:
         if not isinstance(outputs, dict):
@@ -218,7 +236,7 @@ class LatentTransport(Callback):
             raise ValueError(f"""
             Usage of the {LatentTransport.__class__.__name__} callback demands that the pl_module which is training 
             returns a dictionary in it's `training_step`, containing the key '{self.latents_key}' in which the image 
-            samples' latent representation are located. Since no such key was found, the callback tries to find compute 
+            samples' latent representation are located. Since no such key was found, the callback tries to compute 
             the latent representation using the pl_module `encode` method and the image samples located at the key
             '{self.samples_key}'. Fatal: the key '{self.samples_key}' was not found in the output dictionary of the
             pl_module's training_step.
@@ -255,7 +273,7 @@ class LatentTransport(Callback):
                 permutation_map[dim] = self.operator_dim.index(dim)
             else:
                 assert dim in self.transport_dims, f"Flow assertion error !!!"
-                len(self.operator_dim) + 1 + self.transport_dims.index(dim)
+                permutation_map[dim] = len(self.operator_dim) + 1 + self.transport_dims.index(dim)
 
         if len(self.operator_dim) > 0:
             latents_rearranged = latents.permute(*self.operator_dim, 0, *self.transport_dims)
@@ -268,10 +286,16 @@ class LatentTransport(Callback):
         ])
 
         if len(self.operator_dim) > 0:
-            latents_transported = latents_transported.unflatten(0, [self.size[d - 1] for d in self.operator_dim])
+            latents_transported = latents_transported.unflatten(0, [self.size[d - 1] for d in self.operator_dim])  # type: ignore[arg-type]
         else:
             latents_transported = latents_transported.squeeze(0)
-        latents_transported = latents_transported.permute(*permutation_map)
+
+        try:
+            latents_transported = latents_transported.permute(*permutation_map)
+        except:
+            import IPython;
+            IPython.embed();
+            exit(1)
 
         assert latents_transported.shape == latents.shape, "Tensor shape assertion error !!!"
 

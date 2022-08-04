@@ -21,7 +21,7 @@ from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
 from ot_vae_lightning.model import VAE, PartialCheckpoint
 from ot_vae_lightning.prior import GaussianPrior
-from ot_vae_lightning.data import MNIST
+from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import CNN, AutoEncoder
 
 _PSNR_PERFORMANCE = 13
@@ -32,9 +32,9 @@ def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):
     seed_everything(42)
 
     trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
-    datamodule = MNIST(train_batch_size=50)
+    datamodule = MNIST32(train_batch_size=50)
 
-    in_channels, in_resolution = 1, 32  # MNISTDatamodule pads MNIST images such that the resolution is a power of 2
+    in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
 
     encoder = CNN(  # Simple nn.Module
@@ -80,9 +80,9 @@ def test_vae_autoencoder_training(prog_bar=False, gpus=None):
     seed_everything(42)
 
     trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
-    datamodule = MNIST(train_batch_size=50)
+    datamodule = MNIST32(train_batch_size=50)
 
-    in_channels, in_resolution = 1, 32  # MNISTDatamodule pads MNIST images such that the resolution is a power of 2
+    in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
 
     autoencoder = AutoEncoder(

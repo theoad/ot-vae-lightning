@@ -21,9 +21,9 @@ import torch.nn.functional as F
 from pytorch_lightning.callbacks import RichProgressBar
 from pytorch_lightning.utilities.cli import LightningCLI
 from torchmetrics import MetricCollection
-from ot_vae_lightning.data import MNIST
+from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.prior import Prior
-from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint, support_preprocess, support_postprocess
+from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint, inference_preprocess, inference_postprocess
 from ot_vae_lightning.utils import Collage
 from ot_vae_lightning.ot import LatentTransport
 
@@ -74,7 +74,7 @@ class VAE(BaseModule):
         :param learning_rate: The model learning rate. Default `1e-3`
         :param checkpoints: See father class (ot_vae_lightning.model.base.BaseModule) docstring
         """
-        super().__init__(metrics, checkpoints)
+        super().__init__(metrics, checkpoints, metric_on_train=True)
         self.save_hyperparameters()
 
         if autoencoder is None and (encoder is None or decoder is None):
@@ -91,7 +91,7 @@ class VAE(BaseModule):
             self.autoencoder = autoencoder
         else:
             assert encoder is not None and decoder is not None
-            # Don't set self.encoder and self.decoder in order for partial checkpoints loading to not be ambiguous
+            # Don't set self.autoencoder in order for partial checkpoints loading to not be ambiguous
             self.encoder = encoder
             self.decoder = decoder
 
@@ -102,8 +102,8 @@ class VAE(BaseModule):
         x, y = batch
         return {'samples': x, 'targets': x}
 
-    @support_postprocess
-    @support_preprocess
+    @inference_postprocess
+    @inference_preprocess
     def forward(self, x: Tensor) -> Tensor:
         z = self.encode(x, no_preprocess_override=True)
         x_hat = self.decode(z, no_postprocess_override=True)
@@ -113,14 +113,12 @@ class VAE(BaseModule):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
 
     def loss_func(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
-        x = batch['targets']
         z, prior_loss = self.encode(batch['samples'], return_prior_loss=True)
         x_hat = self.decode(z)
-        batch['preds'] = x_hat
-        batch['latents'] = z
+        batch['preds'], batch['latents'] = x_hat, z
 
         prior_loss = prior_loss.mean()
-        recon_loss = F.mse_loss(x_hat, x, reduction="none").sum(dim=(1, 2, 3)).mean()
+        recon_loss = F.mse_loss(x_hat, batch['targets'], reduction="none").sum(dim=(1, 2, 3)).mean()
 
         loss = recon_loss + prior_loss
         logs = {
@@ -139,7 +137,7 @@ class VAE(BaseModule):
             enc_out = self.encoder.out_size
         return torch.Size((enc_out[0]//2, *enc_out[1:]))  # re-parametrization trick
 
-    @support_preprocess
+    @inference_preprocess
     def encode(self, x: Tensor, return_prior_loss: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
         if hasattr(self, 'autoencoder'):
             encodings = self.autoencoder.encode(x)
@@ -148,12 +146,12 @@ class VAE(BaseModule):
             encodings = self.encoder(x)
         z, prior_loss = self.prior(encodings)
         if return_prior_loss:
-            assert not self.inference, 'prior loss cannot be returned when model is in inference mode'
+            assert not self.inference, 'The prior loss cannot be returned when the model is in inference mode'
             return z, prior_loss
         else:
             return z
 
-    @support_postprocess
+    @inference_postprocess
     def decode(self, z: Tensor) -> Tensor:
         if hasattr(self, 'autoencoder'):
             return self.autoencoder.decode(z)
@@ -176,59 +174,74 @@ class VAE(BaseModule):
         batch_size = batch['samples'].shape[0]
         return [self.samples(batch_size) for _ in range(4)]
 
-    @support_postprocess
+    @inference_postprocess
     def samples(self, batch_size: int) -> Tensor:
         z = self.prior.sample((batch_size, *self.latent_size), self.device)
         return self.decode(z, no_postprocess_override=True)
 
 
 if __name__ == '__main__':
-    cli = LightningCLI(VAE, MNIST,
+    cli = LightningCLI(VAE, MNIST32,
                        trainer_defaults=dict(default_root_dir='.'),
                        run=False, save_config_overwrite=True)
-
+    degradation = GaussianBlur(5, sigma=(1.5, 1.5))
     callbacks = [
         Collage(),
         # RichProgressBar(),
         LatentTransport(
             size=cli.model.latent_size,
-            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transformations=degradation,
             transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=True,
             pg_star=0,
             stochastic=False,
-            logging_prefix="transport/gaussian/diag_deterministic"
+            logging_prefix="transport/gaussian/diag_deterministic",
+            transformed_latents_from_train=True,
         ),
         LatentTransport(
             size=cli.model.latent_size,
-            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transformations=degradation,
             transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=False,
             pg_star=0,
             stochastic=False,
-            logging_prefix="transport/gaussian/full_deterministic"
+            logging_prefix="transport/gaussian/mat_deterministic",
+            transformed_latents_from_train=True,
         ),
         LatentTransport(
             size=cli.model.latent_size,
-            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transformations=degradation,
             transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=False,
             pg_star=0,
             stochastic=True,
-            logging_prefix="transport/gaussian/full_stochastic"
+            logging_prefix="transport/gaussian/mat_stochastic",
+            transformed_latents_from_train=True,
         ),
         LatentTransport(
             size=cli.model.latent_size,
-            transformations=GaussianBlur(5, sigma=(0.5, 0.5)),
+            transformations=degradation,
             transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=True,
             pg_star=0,
             stochastic=True,
-            logging_prefix="transport/gaussian/diag_stochastic"
+            logging_prefix="transport/gaussian/diag_stochastic",
+            transformed_latents_from_train=True,
+        ),
+        LatentTransport(
+            size=cli.model.latent_size,
+            transformations=degradation,
+            transport_type="gaussian",
+            transport_dims=(1,),
+            diag=False,
+            pg_star=0,
+            stochastic=True,
+            logging_prefix="transport/gaussian/mat_stochastic_per_channel",
+            transformed_latents_from_train=True,
         )
     ]
     cli.trainer.callbacks += callbacks

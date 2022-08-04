@@ -12,12 +12,16 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 ************************************************************************************************************************
 """
 from typing import Optional, Union, Tuple
+from enum import Enum
 
 import torch
-from ot_vae_lightning.data import BaseDatamodule
+from ot_vae_lightning.data import BaseDatamodule, dataset_split
 import torchvision.transforms as T
 import torchvision.datasets as datasets
 import inspect
+
+
+TvDataset = Enum('TvDataset', datasets.__all__)
 
 
 class TorchvisionDatamodule(BaseDatamodule):
@@ -32,7 +36,7 @@ class TorchvisionDatamodule(BaseDatamodule):
 
     """
     def __init__(self,
-                 dataset_name: str,
+                 dataset_name: TvDataset,
                  root: Union[str, Tuple[str, str]],
                  download: bool = True,
                  num_workers: int = 10,
@@ -104,7 +108,7 @@ class TorchvisionDatamodule(BaseDatamodule):
             **self._train_kwarg
         )
 
-        self.train_dataset, self.val_dataset = self._dataset_split(
+        self.train_dataset, self.val_dataset = dataset_split(
             datasets=[self.train_dataset, self.val_dataset],
             split=self.hparams.train_val_split,
             seed=self.hparams.seed
