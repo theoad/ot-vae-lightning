@@ -184,66 +184,64 @@ if __name__ == '__main__':
     cli = LightningCLI(VAE, MNIST32,
                        trainer_defaults=dict(default_root_dir='.'),
                        run=False, save_config_overwrite=True)
-    degradation = GaussianBlur(5, sigma=(1.5, 1.5))
+
+    transport_kwargs = dict(
+        size=cli.model.latent_size,
+        transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
+        transport_type="gaussian",
+        transformed_latents_from_train=True,
+        make_pd=True,
+        verbose=True,
+        pg_star=0,
+    )
+
     callbacks = [
         Collage(),
         # RichProgressBar(),
         LatentTransport(
-            size=cli.model.latent_size,
-            transformations=degradation,
-            transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=True,
-            pg_star=0,
             stochastic=False,
-            logging_prefix="transport/gaussian/diag_deterministic",
-            transformed_latents_from_train=True,
+            logging_prefix="diag_deterministic",
+            **transport_kwargs
         ),
         LatentTransport(
-            size=cli.model.latent_size,
-            transformations=degradation,
-            transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=False,
-            pg_star=0,
             stochastic=False,
-            logging_prefix="transport/gaussian/mat_deterministic",
-            transformed_latents_from_train=True,
+            logging_prefix="mat_deterministic",
+            **transport_kwargs
         ),
         LatentTransport(
-            size=cli.model.latent_size,
-            transformations=degradation,
-            transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=False,
-            pg_star=0,
             stochastic=True,
-            logging_prefix="transport/gaussian/mat_stochastic",
-            transformed_latents_from_train=True,
+            logging_prefix="mat_stochastic",
+            **transport_kwargs
         ),
         LatentTransport(
-            size=cli.model.latent_size,
-            transformations=degradation,
-            transport_type="gaussian",
             transport_dims=(1, 2, 3),
             diag=True,
-            pg_star=0,
             stochastic=True,
-            logging_prefix="transport/gaussian/diag_stochastic",
-            transformed_latents_from_train=True,
+            logging_prefix="diag_stochastic",
+            **transport_kwargs
         ),
         LatentTransport(
-            size=cli.model.latent_size,
-            transformations=degradation,
-            transport_type="gaussian",
             transport_dims=(1,),
             diag=False,
-            pg_star=0,
             stochastic=True,
-            logging_prefix="transport/gaussian/mat_stochastic_per_channel",
-            transformed_latents_from_train=True,
+            logging_prefix="mat_stochastic_per_needle",
+            **transport_kwargs
+        ),
+        LatentTransport(
+            transport_dims=(2, 3),
+            diag=False,
+            stochastic=True,
+            logging_prefix="mat_stochastic_per_channel",
+            **transport_kwargs
         )
     ]
+
     cli.trainer.callbacks += callbacks
     cli.trainer.fit(cli.model, cli.datamodule)
     cli.trainer.test(cli.model, cli.datamodule)

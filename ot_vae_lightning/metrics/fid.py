@@ -24,13 +24,7 @@ from torchmetrics.utilities import rank_zero_info
 from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning import LightningModule
 from torchmetrics.image.fid import NoTrainInceptionV3, _compute_fid
-
-
-def _compute_mean_cov(sum, sum_corr, num_obs):
-    """Empirical computation of mean and covariance matrix"""
-    mean = sum / num_obs
-    cov = (1.0 / (num_obs - 1.0)) * sum_corr - (num_obs / (num_obs - 1.0)) * mean.unsqueeze(1).mm(mean.unsqueeze(0))
-    return mean, cov
+from ot_vae_lightning.ot import compute_mean_cov
 
 
 class FrechetInceptionDistance(Metric):
@@ -57,7 +51,7 @@ class FrechetInceptionDistance(Metric):
             net: Optional[torch.nn.Module] = None,  # inception v3 by default
             feature_size: Optional[int] = 2048,
             to_255: Optional[bool] = False,
-            data_range: Optional[Tuple[float, float]] = (0.0, 1.0),
+            data_range: Optional[Tuple[float, float]] = (0., 1.),
             compute_on_step: Optional[bool] = False,
             dist_sync_on_step: Optional[bool] = False,
             process_group: Optional[Any] = None,
@@ -80,7 +74,7 @@ class FrechetInceptionDistance(Metric):
                 )
 
             self.net = NoTrainInceptionV3(name='inception-v3-compat', features_list=[str(feature_size)])
-            self.to_255 = data_range != (0, 255)
+            self.to_255 = data_range != (0., 255.)
         else:
             self.net = net
             self.net.eval()
@@ -104,7 +98,7 @@ class FrechetInceptionDistance(Metric):
         with torch.no_grad():
             for idx, (img, label) in enumerate(dataloader):
                 self.update(img.to(pl_module.device), real=True)
-        self.real_mean, self.real_cov = _compute_mean_cov(self.real_sum, self.real_correlation, self.num_real_obs)
+        self.real_mean, self.real_cov = compute_mean_cov(self.real_sum, self.real_correlation, self.num_real_obs)
         self._persistent['real_mean'] = True
         self._persistent['real_cov'] = True
         self.real_prepared = True
@@ -134,6 +128,6 @@ class FrechetInceptionDistance(Metric):
 
     def compute(self) -> Tensor:
         """ Calculate FID score based on accumulated extracted features from the two distributions """
-        fake_mean, fake_cov = _compute_mean_cov(self.fake_sum, self.fake_correlation, self.num_fake_obs)
+        fake_mean, fake_cov = compute_mean_cov(self.fake_sum, self.fake_correlation, self.num_fake_obs)
         # compute fid
         return _compute_fid(self.real_mean, self.real_cov, fake_mean, fake_cov)

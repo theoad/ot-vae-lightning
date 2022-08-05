@@ -1,9 +1,9 @@
-import warnings
+from typing import Union, Tuple
 
 import torch
 from torch import Tensor, BoolTensor
 
-__all__ = ['eye_like', 'sqrtm', 'logm', 'expm', 'invsqrtm', 'is_spd', 'is_spsd', 'is_pd',
+__all__ = ['eye_like', 'sqrtm', 'logm', 'expm', 'invsqrtm', 'is_spd', 'is_pd',
            'is_symmetric', 'min_eig', 'make_psd', 'STABILITY_CONST']
 
 STABILITY_CONST = 1e-8
@@ -111,28 +111,22 @@ def is_spd(matrices: Tensor, strict=True) -> BoolTensor:
     return torch.logical_and(is_symmetric(matrices), is_pd(matrices, strict=strict)).bool()
 
 
-def is_spsd(matrices: Tensor) -> BoolTensor:
-    """
-    Boolean method. Checks if matrix is Symmetric Positive Semi-Definite (SPSD).
-
-    :param matrices: Batch of matrices of shape torch.Size([..., D, D])
-    :return: Boolean tensor T of shape torch.Size([...]). with T[i] == True <=> matrices[i] is SPSD
-    """
-    return is_pd(matrices, strict=False)
-
-
-def make_psd(matrices: Tensor, strict: bool = False) -> Tensor:
+def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
     """
     Add to each matrix its minimal eigen value to make it positive definite.
 
     :param matrices: Batch of matrices with shape [..., D, D]
     :param strict: If ``True``, add a small stability constant to make the matrices positive definite (PD)
+    :param return_correction: If ``True``, returns the correction added to the diagonal of the matrices.
     :return: Tensor T with shape [...]. with T[i] = matrices[i] + min(eig(matrices[i]) * I
     """
     small_val = torch.abs(min_eig(matrices).clamp(max=0))
     if strict:
         small_val += STABILITY_CONST
-    return matrices + small_val * eye_like(matrices)
+    res = matrices + small_val * eye_like(matrices)
+    if return_correction:
+        return res, small_val
+    return res
 
 
 def _around(t: Tensor, decimals: float = 9) -> Tensor:

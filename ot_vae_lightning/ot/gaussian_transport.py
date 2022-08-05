@@ -47,8 +47,9 @@ class GaussianTransport(Metric):
                  diag: bool,
                  pg_star: float = 0.,
                  stochastic: bool = False,
-                 persistent: bool = True,
-                 make_pd: bool = True
+                 persistent: bool = False,
+                 make_pd: bool = False,
+                 verbose: bool = False
                  ):
         r"""
         :param dim: The dimensionality of the distributions to transport
@@ -64,6 +65,7 @@ class GaussianTransport(Metric):
         self.pg_star = pg_star
         self.stochastic = stochastic
         self.make_pd = make_pd
+        self.verbose = verbose
 
         vec_init = torch.zeros(self.dim, dtype=torch.double)
         mat_init = vec_init if diag else torch.zeros(self.dim, self.dim, dtype=torch.double)
@@ -114,7 +116,8 @@ class GaussianTransport(Metric):
             self.mean_target,
             torch.diag_embed(self.cov_source) if self.diag else self.cov_source,
             torch.diag_embed(self.cov_target) if self.diag else self.cov_target,
-            make_pd=self.make_pd
+            make_pd=self.make_pd,
+            verbose=self.verbose
         )
 
         transport_operator, cov_noise = compute_transport_operators(
@@ -123,7 +126,8 @@ class GaussianTransport(Metric):
             stochastic=self.stochastic,
             diag=self.diag,
             pg_star=self.pg_star,
-            make_pd=self.make_pd
+            make_pd=self.make_pd,
+            verbose=self.verbose
         )
 
         self.transport_operator.data = transport_operator
