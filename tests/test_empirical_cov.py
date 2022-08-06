@@ -6,8 +6,7 @@ from ot_vae_lightning.model.base import human_format
 from torch.linalg import vector_norm as norm
 
 
-def empirical_cov_computation(dim, batch_size=100):
-    n_samples = [int(1e3), int(1e4), int(1e5), int(1e6)]
+def empirical_cov_computation(dim, n_samples, batch_size=100):
 
     mean = torch.randn(dim, dtype=torch.double)
     m = torch.randn(dim, dim, dtype=torch.double)
@@ -60,10 +59,10 @@ def empirical_cov_computation(dim, batch_size=100):
         assert mean_diff < 1e-8 and cov_diff < 1e-8 and w2_diff < 1e-3
 
 
-def test_empirical_cov_computation():
+def test_empirical_cov_computation(n_samples=(int(1e3), int(1e4))):
     for dim in [64, 128, 256, 512]:
-        empirical_cov_computation(dim)
+        empirical_cov_computation(dim, n_samples)
 
 
 if __name__ == "__main__":
-    test_empirical_cov_computation()
+    test_empirical_cov_computation((int(1e3), int(1e4), int(1e5), int(1e6)))
