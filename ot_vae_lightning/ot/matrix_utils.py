@@ -3,8 +3,19 @@ from typing import Union, Tuple
 import torch
 from torch import Tensor, BoolTensor
 
-__all__ = ['eye_like', 'sqrtm', 'logm', 'expm', 'invsqrtm', 'is_spd', 'is_pd',
-           'is_symmetric', 'min_eig', 'make_psd', 'STABILITY_CONST']
+__all__ = [
+    'eye_like',
+    'sqrtm',
+    'logm',
+    'expm',
+    'invsqrtm',
+    'is_spd',
+    'is_pd',
+    'is_symmetric',
+    'min_eig',
+    'make_psd',
+    'STABILITY_CONST'
+]
 
 STABILITY_CONST = 1e-8
 
@@ -18,16 +29,16 @@ def _matrix_operator(matrices: Tensor, operator) -> Tensor:
     https://github.com/alexandrebarachant/pyRiemann
     """
     eigvals, eigvects = torch.linalg.eigh(matrices, UPLO='L')
-    eigvals = torch.diag_embed(operator(_around(eigvals)))
-    return _around(eigvects) @ _around(eigvals) @ _around(eigvects).transpose(-2, -1)
+    eigvals = torch.diag_embed(operator(eigvals))
+    return eigvects @ eigvals @ eigvects.transpose(-2, -1)
 
 
 def eye_like(matrices: Tensor) -> Tensor:
     """
     Return Identity matrix with the same shape, device and dtype as matrices
 
-    :param matrices: Batch of matrices with shape [..., C, D]
-    :return: Tensor T with shape [..., C, D]. with T[i] = torch.eye(C, D)
+    :param matrices: Batch of matrices with shape [*, C, D] where * is zero or leading batch dimensions
+    :return: Tensor T with shape [*, C, D]. with T[i] = torch.eye(C, D)
     """
     return torch.eye(*matrices.shape[-2:-1], out=torch.empty_like(matrices)).expand_as(matrices)
 
@@ -69,11 +80,11 @@ def is_symmetric(matrices: Tensor) -> BoolTensor:
     """
     Boolean method. Checks if matrix is symmetric.
 
-    :param matrices: Batch of matrices with shape [..., D, D]
-    :return: Boolean tensor T with shape [...]. with T[i] == True <=> matrices[i] is symmetric
+    :param matrices: Batch of matrices with shape [*, D, D] where * is zero or leading batch dimensions
+    :return: Boolean tensor T with shape [*]. with T[i] == True <=> matrices[i] is symmetric
     """
     if matrices.size(-1) != matrices.size(-2):
-        return torch.full_like(matrices.mean(dim=(-1, -2)), 0).bool()
+        return torch.full_like(matrices.mean(dim=(-1, -2)), 0).bool()  # = Tensor([False, False, ..., False])
     return torch.sum((matrices - matrices.transpose(-2, -1))**2, dim=(-1, -2)) < STABILITY_CONST
 
 
@@ -81,11 +92,9 @@ def min_eig(matrices: Tensor) -> Tensor:
     """
     Returns the minimal eigen values of a batch of matrices (signed).
 
-    :param matrices: Batch of matrices with shape [..., D, D]
-    :return: Tensor T with shape [...]. with T[i] = min(eig(matrices[i])
+    :param matrices: Batch of matrices with shape [*, D, D] where * is zero or leading batch dimensions
+    :return: Tensor T with shape [*]. with T[i] = min(eig(matrices[i])
     """
-    if matrices.size(-1) != matrices.size(-2):
-        ValueError("matrices are not square. Cannot compute eigen values")
     return torch.min(torch.linalg.eigh(matrices)[0], dim=-1)[0]
 
 
@@ -93,9 +102,9 @@ def is_pd(matrices: Tensor, strict=True) -> BoolTensor:
     """
     Boolean method. Checks if matrices are Positive Definite (PD).
 
-    :param matrices: Batch of matrices with shape [..., D, D]
+    :param matrices: Batch of matrices with shape [*, D, D] where * is zero or leading batch dimensions
     :param strict: If ``False`` checks the matrices are positive semi-definite
-    :return: Boolean tensor T with shape [...]. with T[i] == True <=> matrices[i] is PD
+    :return: Boolean tensor T with shape [*]. with T[i] == True <=> matrices[i] is PD
     """
     return min_eig(matrices) > 0 if strict else min_eig(matrices) >= 0
 
@@ -104,9 +113,9 @@ def is_spd(matrices: Tensor, strict=True) -> BoolTensor:
     """
     Boolean method. Checks if matrices are Symmetric and Positive Definite (SPD).
 
-    :param matrices: Batch of matrices with shape [..., D, D]
+    :param matrices: Batch of matrices with shape [*, D, D] where * is zero or leading batch dimensions
     :param strict: If ``False`` checks the matrices are positive semi-definite (SPSD)
-    :return: Boolean tensor T with shape [...]. with T[i] == True <=> matrices[i] is SPD
+    :return: Boolean tensor T with shape [*]. with T[i] == True <=> matrices[i] is SPD
     """
     return torch.logical_and(is_symmetric(matrices), is_pd(matrices, strict=strict)).bool()
 
@@ -115,10 +124,10 @@ def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = F
     """
     Add to each matrix its minimal eigen value to make it positive definite.
 
-    :param matrices: Batch of matrices with shape [..., D, D]
+    :param matrices: Batch of matrices with shape [*, D, D] where * is zero or leading batch dimensions
     :param strict: If ``True``, add a small stability constant to make the matrices positive definite (PD)
     :param return_correction: If ``True``, returns the correction added to the diagonal of the matrices.
-    :return: Tensor T with shape [...]. with T[i] = matrices[i] + min(eig(matrices[i]) * I
+    :return: Tensor T with shape [*]. with T[i] = matrices[i] + min(eig(matrices[i]) * I
     """
     small_val = torch.abs(min_eig(matrices).clamp(max=0))
     if strict:
@@ -127,10 +136,3 @@ def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = F
     if return_correction:
         return res, small_val
     return res
-
-
-def _around(t: Tensor, decimals: float = 9) -> Tensor:
-    """
-    Rounding method to avoid numerical errors, torch equivalent of np.around(array, decimals=9)
-    """
-    return torch.round((t * 10 ** decimals))/10 ** decimals

@@ -7,3 +7,5 @@ numpy
 sympy
 rich
 wandb
+einops
+vit-pytorch

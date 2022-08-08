@@ -46,6 +46,8 @@ class FrechetInceptionDistance(Metric):
     .. _TheoA: https://github.com/theoad
     """
 
+    higher_is_better: bool = False
+
     def __init__(
             self,
             net: Optional[torch.nn.Module] = None,  # inception v3 by default

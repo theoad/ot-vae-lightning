@@ -19,9 +19,9 @@ from torchvision.transforms.transforms import GaussianBlur
 import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning.callbacks import RichProgressBar
-from pytorch_lightning.utilities.cli import LightningCLI
+from pytorch_lightning.cli import LightningCLI
 from torchmetrics import MetricCollection
-from ot_vae_lightning.data import MNIST32
+from ot_vae_lightning.data import MNIST32, MNIST, CIFAR10
 from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint, inference_preprocess, inference_postprocess
 from ot_vae_lightning.utils import Collage
@@ -48,6 +48,7 @@ class VAE(BaseModule):
                  encoder: Optional[nn.Module] = None,
                  decoder: Optional[nn.Module] = None,
                  learning_rate: float = 1e-3,
+                 plateau_metric_monitor: str = None,
                  checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
                  ) -> None:
         """
@@ -110,7 +111,13 @@ class VAE(BaseModule):
         return x_hat
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        opt = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        if self.hparams.plateau_metric_monitor is None:
+            return opt
+        mode = 'max' if self.val_metrics[self.hparams.plateau_metric_monitor].higher_is_better else 'min'
+        name = self.val_metrics.prefix + self.hparams.plateau_metric_monitor
+        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode, 0.5, 20, True)
+        return {"optimizer": opt, "scheduler": sched, "monitor": name}
 
     def loss_func(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
         z, prior_loss = self.encode(batch['samples'], return_prior_loss=True)
@@ -135,7 +142,7 @@ class VAE(BaseModule):
         else:
             assert hasattr(self, 'encoder')
             enc_out = self.encoder.out_size
-        return torch.Size((enc_out[0]//2, *enc_out[1:]))  # re-parametrization trick
+        return self.prior.out_size(enc_out)
 
     @inference_preprocess
     def encode(self, x: Tensor, return_prior_loss: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
@@ -181,7 +188,7 @@ class VAE(BaseModule):
 
 
 if __name__ == '__main__':
-    cli = LightningCLI(VAE, MNIST32,
+    cli = LightningCLI(VAE, MNIST,
                        trainer_defaults=dict(default_root_dir='.'),
                        run=False, save_config_overwrite=True)
 
@@ -198,48 +205,55 @@ if __name__ == '__main__':
     callbacks = [
         Collage(),
         # RichProgressBar(),
+        # LatentTransport(
+        #     transport_dims=(1, 2, 3),
+        #     diag=True,
+        #     stochastic=False,
+        #     logging_prefix="diag_deterministic",
+        #     **transport_kwargs
+        # ),
+        # LatentTransport(
+        #     transport_dims=(1, 2, 3),
+        #     diag=False,
+        #     stochastic=False,
+        #     logging_prefix="mat_deterministic",
+        #     **transport_kwargs
+        # ),
+        # LatentTransport(
+        #     transport_dims=(1, 2, 3),
+        #     diag=False,
+        #     stochastic=True,
+        #     logging_prefix="mat_stochastic",
+        #     **transport_kwargs
+        # ),
+        # LatentTransport(
+        #     transport_dims=(1, 2, 3),
+        #     diag=True,
+        #     stochastic=True,
+        #     logging_prefix="diag_stochastic",
+        #     **transport_kwargs
+        # ),
         LatentTransport(
-            transport_dims=(1, 2, 3),
-            diag=True,
-            stochastic=False,
-            logging_prefix="diag_deterministic",
-            **transport_kwargs
-        ),
-        LatentTransport(
-            transport_dims=(1, 2, 3),
+            transport_dims=(1,),
             diag=False,
             stochastic=False,
-            logging_prefix="mat_deterministic",
-            **transport_kwargs
-        ),
-        LatentTransport(
-            transport_dims=(1, 2, 3),
-            diag=False,
-            stochastic=True,
-            logging_prefix="mat_stochastic",
-            **transport_kwargs
-        ),
-        LatentTransport(
-            transport_dims=(1, 2, 3),
-            diag=True,
-            stochastic=True,
-            logging_prefix="diag_stochastic",
+            logging_prefix="mat_per_needle",
             **transport_kwargs
         ),
         LatentTransport(
             transport_dims=(1,),
-            diag=False,
-            stochastic=True,
-            logging_prefix="mat_stochastic_per_needle",
+            diag=True,
+            stochastic=False,
+            logging_prefix="mat_per_needle_diag",
             **transport_kwargs
         ),
-        LatentTransport(
-            transport_dims=(2, 3),
-            diag=False,
-            stochastic=True,
-            logging_prefix="mat_stochastic_per_channel",
-            **transport_kwargs
-        )
+        # LatentTransport(
+        #     transport_dims=(2, 3),
+        #     diag=False,
+        #     stochastic=True,
+        #     logging_prefix="mat_stochastic_per_channel",
+        #     **transport_kwargs
+        # )
     ]
 
     cli.trainer.callbacks += callbacks

@@ -19,6 +19,7 @@ from torch.nn.common_types import _size_2_t
 from math import sqrt, log2
 import numpy as np
 from sympy import divisors
+from copy import deepcopy
 
 
 # ******************************************************************************************************************** #
@@ -31,7 +32,6 @@ class ConvLayer(nn.Conv2d):
             out_features: int,
 
             # ConvLayer params
-            residual: bool = False,
             normalization: Optional[str] = None,
             activation: Optional[str] = None,
             equalized_lr: bool = False,
@@ -56,7 +56,6 @@ class ConvLayer(nn.Conv2d):
         :param out_features: Number of channels produced by the convolution
 
         :param bias: If ``True``, adds a learnable bias to the output. Default: ``True``
-        :param residual: If ``True``, add the input to the output tensor (skip connection). Default: ``False``
         :param normalization: Normalization layer. nn.Module expecting parameter ``num_features`` in `__init__`.
                               Default None
         :param activation: Activation layer. nn.Module expecting no parameter in ``__init__``. Default `None
@@ -72,18 +71,17 @@ class ConvLayer(nn.Conv2d):
         """
         super().__init__(in_features, out_features, kernel_size, stride, padding, dilation, groups, bias)
 
-        self.residual = residual
         self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
         self.scale = 1 / np.sqrt(np.prod(self.weight.shape[1:])) if equalized_lr else 1
 
         if normalization is None or "none" in normalization.lower() or "null" in normalization.lower():
             self.normalization = nn.Identity()
         elif "batch" in normalization.lower():
-            self.normalization = nn.BatchNorm2d(in_features)
+            self.normalization = nn.BatchNorm2d(out_features)
         elif "group" in normalization.lower():
-            self.normalization = nn.GroupNorm(div_sqrt(in_features), in_features)
+            self.normalization = nn.GroupNorm(div_sqrt(out_features), out_features)
         elif "instance" in normalization.lower():
-            self.normalization = nn.InstanceNorm2d(in_features)
+            self.normalization = nn.InstanceNorm2d(out_features)
         else:
             raise NotImplementedError(f"normalization={normalization} not supported")
 
@@ -101,12 +99,10 @@ class ConvLayer(nn.Conv2d):
             raise NotImplementedError(f"activation={activation} not supported")
 
     def forward(self, x: Tensor) -> Tensor:
-        out = self.normalization(x)
-        out = self._conv_forward(out, self.weight * self.scale, self.bias)
+        out = self._conv_forward(x, self.weight * self.scale, self.bias)
+        out = self.normalization(out)
         out = self.activation(out)
         out = self.dropout(out)
-        if self.residual:
-            return (out + x) / sqrt(2)
         return out
 
 
@@ -127,6 +123,7 @@ class ConvBlock(nn.Sequential):
             # ConvLayer params
             normalization: Optional[str] = "batchnorm",
             activation: Optional[str] = "relu",
+            residual: bool = False,
             equalized_lr: bool = False,
             dropout: float = 0.,
 
@@ -137,7 +134,6 @@ class ConvBlock(nn.Sequential):
             dilation: _size_2_t = 1,
             groups: int = 1,
             bias: bool = True,
-            residual: bool = False
     ) -> None:
         """
         Conv block that wraps a series of `n_layers` ConvLayer with up/down sample.
@@ -183,12 +179,25 @@ class ConvBlock(nn.Sequential):
 
         super().__init__(
             down_sample,
-            ConvLayer(in_features, out_features, residual, normalization, activation, equalized_lr,
+            ConvLayer(in_features, out_features, normalization, activation, equalized_lr,
                       dropout, kernel_size, stride, padding, dilation, groups, bias),
-            *([ConvLayer(out_features, out_features, residual, normalization, activation, equalized_lr,
+            *([ConvLayer(out_features, out_features, normalization, activation, equalized_lr,
                          dropout, kernel_size, stride, padding, dilation, groups, bias)] * (n_layers - 1)),
             up_sample
         )
+
+        self.residual = residual
+        self.residual_sample = nn.Sequential(
+            deepcopy(down_sample),
+            ConvLayer(in_features, out_features, None, None, equalized_lr, 0., 1, 0, 0),
+            deepcopy(up_sample)
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        out = super().forward(x)
+        if self.residual:
+            return out + self.residual_sample(x)
+        return out
 
 
 # ******************************************************************************************************************** #
@@ -207,6 +216,7 @@ class CNN(nn.Sequential):
 
             # ConvBlock params
             n_layers: int = 2,
+            residual: bool = False,
             down_sample: Union[bool, int] = False,
             up_sample: Union[bool, int] = False,
 
@@ -223,7 +233,6 @@ class CNN(nn.Sequential):
             dilation: _size_2_t = 1,
             groups: int = 1,
             bias: bool = True,
-            residual: bool = False
     ) -> None:
         """
         `PyTorch <https://pytorch.org/>`_ implementation of a modular CNN
@@ -295,11 +304,11 @@ class CNN(nn.Sequential):
 
         self.out_size = torch.Size([out_features, out_resolution, out_resolution])
         super().__init__(
-            ConvLayer(features[0], features[0], equalized_lr=equalized_lr, kernel_size=1, padding=0),
-            *[ConvBlock(ic, oc, n_layers, down_sample, up_sample, normalization, activation, equalized_lr,
-                        dropout, kernel_size, stride, padding, dilation, groups, bias, residual)
+            ConvLayer(features[0], features[0], None, None, equalized_lr, 0., 1, 0, 0),
+            *[ConvBlock(ic, oc, n_layers, down_sample, up_sample, normalization, activation, residual, equalized_lr,
+                        dropout, kernel_size, stride, padding, dilation, groups, bias)
               for ic, oc in zip(features[:-1], features[1:])],
-            ConvLayer(features[-1], features[-1], equalized_lr=equalized_lr, kernel_size=1, padding=0)
+            ConvLayer(features[-1], features[-1], None, None, equalized_lr, 0., 1, 0, 0),
         )
 
 
@@ -320,6 +329,7 @@ class AutoEncoder(nn.Module):
 
             # ConvBlock params
             n_layers: int = 2,
+            residual: bool = False,
             down_up_sample: Union[bool, int] = False,
 
             # ConvLayer params
@@ -335,7 +345,6 @@ class AutoEncoder(nn.Module):
             dilation: _size_2_t = 1,
             groups: int = 1,
             bias: bool = True,
-            residual: bool = False
     ) -> None:
         """
         `PyTorch <https://pytorch.org/>`_ implementation of a modular CNN
@@ -383,13 +392,13 @@ class AutoEncoder(nn.Module):
                                        latent_resolution, latent_resolution])
 
         self.encoder = CNN(in_features, latent_features * (1 + int(double_encoded_features)), in_resolution,
-                           latent_resolution, intermediate_features, capacity, n_layers, down_up_sample, False,
-                           normalization, activation, equalized_lr, dropout, kernel_size, stride, padding,
-                           dilation, groups, bias, residual)
+                           latent_resolution, intermediate_features, capacity, n_layers, residual, down_up_sample,
+                           False, normalization, activation, equalized_lr, dropout, kernel_size, stride, padding,
+                           dilation, groups, bias)
         self.decoder = CNN(latent_features, in_features, latent_resolution, in_resolution,
                            intermediate_features[::-1] if intermediate_features is not None else None,
-                           capacity, n_layers, False, down_up_sample, normalization, activation, equalized_lr, dropout,
-                           kernel_size, stride, padding, dilation, groups, bias, residual)
+                           capacity, n_layers, residual, False, down_up_sample, normalization, activation, equalized_lr,
+                           dropout, kernel_size, stride, padding, dilation, groups, bias)
 
     def encode(self, x: Tensor) -> Tensor:
         return self.encoder(x)

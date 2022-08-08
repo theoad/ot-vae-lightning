@@ -1,0 +1,56 @@
+model:
+  metrics:
+    class_path: torchmetrics.MetricCollection
+    init_args:
+      metrics:
+        psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
+  plateau_metric_monitor: psnr
+  encoder:
+    class_path: ot_vae_lightning.networks.ViT
+    init_args:
+      image_size: 28
+      patch_size: 7
+      dim: 128
+      depth: 6
+      heads: 8
+      mlp_dim: 512
+      channels: 1
+      dim_head: 64
+      dropout: 0.1
+      emb_dropout: 0.2
+      n_embed_tokens: 2
+      n_input_tokens: null
+      n_output_tokens: 2
+      patch_to_embed: true
+      embed_to_patch: false
+  decoder:
+    class_path: ot_vae_lightning.networks.ViT
+    init_args:
+      image_size: 28
+      patch_size: 7
+      dim: 128
+      depth: 2
+      heads: 8
+      mlp_dim: 512
+      dim_head: 64
+      channels: 1
+      dropout: 0.1
+      emb_dropout: 0.
+      n_embed_tokens: null
+      n_input_tokens: 1
+      n_output_tokens: null
+      patch_to_embed: false
+      embed_to_patch: true
+  prior:
+    class_path: ot_vae_lightning.prior.GaussianPrior
+    init_args:
+      loss_coeff: 1
+      empirical_kl: false
+      reparam_dim: 1
+data:
+  train_val_split: 0.9
+  seed: null
+  train_batch_size: 256
+  val_batch_size: 1024
+  test_batch_size: 1024
+  num_workers: 10

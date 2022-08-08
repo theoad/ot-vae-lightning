@@ -1,12 +1,9 @@
-seed_everything: null
+seed_everything: 42
 trainer:
-  checkpoint_callback: null
   enable_checkpointing: true
-  default_root_dir: null
-  gradient_clip_val: null
-  gpus: 1
-  log_gpu_memory: null
-  max_epochs: 50
+  accelerator: gpu
+  devices: 1
+  max_epochs: 1000
   strategy: null
   sync_batchnorm: false
   precision: 32

@@ -1,5 +1,6 @@
+from math import sqrt
 import torch
-from ot_vae_lightning.ot.matrix_utils import is_spd
+from ot_vae_lightning.ot.matrix_utils import is_spd, STABILITY_CONST
 from ot_vae_lightning.ot.w2_utils import w2_gaussian
 from torch.distributions import MultivariateNormal
 from ot_vae_lightning.model.base import human_format
@@ -56,7 +57,7 @@ def empirical_cov_computation(dim, n_samples, batch_size=100):
         print(f"{ns_d + ' ' * (len('num samples') - len(ns_d))} |    {'{:.2f}'.format(mean_diff)}    |    "
               f"{'{:.2f}'.format(cov_diff)}   |   {'{:.2f}'.format(w2_diff)}")
         print("------------|------------|-----------|-----------")
-        assert mean_diff < 1e-8 and cov_diff < 1e-8 and w2_diff < 1e-3
+        assert mean_diff < STABILITY_CONST and cov_diff < STABILITY_CONST and w2_diff < sqrt(STABILITY_CONST)
 
 
 def test_empirical_cov_computation(n_samples=(int(1e3), int(1e4))):

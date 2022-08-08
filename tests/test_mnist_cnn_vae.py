@@ -1,7 +1,7 @@
 """
 ************************************************************************************************************************
 
-`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI
+`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI CNN VAE
 
 Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 

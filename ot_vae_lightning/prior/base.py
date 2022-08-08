@@ -14,7 +14,10 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 from typing import Tuple
 from abc import ABC, abstractmethod
+
+import torch
 from torch import Tensor
+from torch.types import _size
 import torch.nn as nn
 from torch.distributions import Distribution
 
@@ -36,6 +39,10 @@ class Prior(nn.Module, ABC):
 
     @abstractmethod
     def sample(self, shape, device) -> Tensor:
+        pass
+
+    @abstractmethod
+    def out_size(self, size: _size) -> _size:
         pass
 
     @staticmethod
