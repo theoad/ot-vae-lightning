@@ -109,7 +109,7 @@ class ConvLayer(nn.Conv2d):
 # ******************************************************************************************************************** #
 
 
-class ConvBlock(nn.Sequential):
+class ConvBlock(nn.Module):
     def __init__(
             self,
             in_features: int,
@@ -177,7 +177,8 @@ class ConvBlock(nn.Sequential):
         elif isinstance(up_sample, bool) and up_sample: up_sample = nn.Upsample(scale_factor=2)
         else: up_sample = nn.Identity()
 
-        super().__init__(
+        super().__init__()
+        self.block = nn.Sequential(
             down_sample,
             ConvLayer(in_features, out_features, normalization, activation, equalized_lr,
                       dropout, kernel_size, stride, padding, dilation, groups, bias),
@@ -186,17 +187,16 @@ class ConvBlock(nn.Sequential):
             up_sample
         )
 
-        self.residual = residual
-        self.residual_sample = nn.Sequential(
+        self.residual = nn.Sequential(
             deepcopy(down_sample),
-            ConvLayer(in_features, out_features, None, None, equalized_lr, 0., 1, 0, 0),
+            ConvLayer(in_features, out_features, None, None, equalized_lr, 0., 1, 1, 0, 1, 1, False),
             deepcopy(up_sample)
-        )
+        ) if residual else None
 
     def forward(self, x: Tensor) -> Tensor:
-        out = super().forward(x)
-        if self.residual:
-            return out + self.residual_sample(x)
+        out = self.block(x)
+        if self.residual is not None:
+            return out + self.residual(x)
         return out
 
 
@@ -304,11 +304,11 @@ class CNN(nn.Sequential):
 
         self.out_size = torch.Size([out_features, out_resolution, out_resolution])
         super().__init__(
-            ConvLayer(features[0], features[0], None, None, equalized_lr, 0., 1, 0, 0),
+            ConvLayer(features[0], features[0], None, None, equalized_lr, 0., 1, 1, 0, 1, 1, False),
             *[ConvBlock(ic, oc, n_layers, down_sample, up_sample, normalization, activation, residual, equalized_lr,
                         dropout, kernel_size, stride, padding, dilation, groups, bias)
               for ic, oc in zip(features[:-1], features[1:])],
-            ConvLayer(features[-1], features[-1], None, None, equalized_lr, 0., 1, 0, 0),
+            ConvLayer(features[-1], features[-1], None, None, equalized_lr, 0., 1, 1, 0, 1, 1, False),
         )
 
 
@@ -392,8 +392,9 @@ class AutoEncoder(nn.Module):
                                        latent_resolution, latent_resolution])
 
         self.encoder = CNN(in_features, latent_features * (1 + int(double_encoded_features)), in_resolution,
-                           latent_resolution, intermediate_features, capacity, n_layers, residual, down_up_sample,
-                           False, normalization, activation, equalized_lr, dropout, kernel_size, stride, padding,
+                           latent_resolution, intermediate_features, capacity, n_layers,
+                           residual, down_up_sample, False, normalization, activation,
+                           equalized_lr, dropout, kernel_size, stride, padding,
                            dilation, groups, bias)
         self.decoder = CNN(latent_features, in_features, latent_resolution, in_resolution,
                            intermediate_features[::-1] if intermediate_features is not None else None,

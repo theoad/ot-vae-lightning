@@ -27,7 +27,19 @@ _PSNR_PERFORMANCE = 13
 _MAX_EPOCH = 2
 
 
-def test_vae_latent_transport(prog_bar=False, gpus=None):
+transport_kwargs = dict(
+    transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
+    transport_type="gaussian",
+    transformed_latents_from_train=True,
+    make_pd=True,
+    verbose=True,
+    stochastic=False,
+    pg_star=0,
+    persistent=True
+)
+
+
+def test_vae_latent_transport(prog_bar=False):
     seed_everything(42)
 
     datamodule = MNIST32(train_batch_size=50)
@@ -42,7 +54,8 @@ def test_vae_latent_transport(prog_bar=False, gpus=None):
         latent_resolution,
         capacity=4,
         double_encoded_features=True,
-        down_up_sample=True
+        down_up_sample=True,
+        residual=True
     )
 
     model = VAE(
@@ -51,38 +64,30 @@ def test_vae_latent_transport(prog_bar=False, gpus=None):
         prior=GaussianPrior(loss_coeff=0.1),
     )
 
-    transport_kwargs = dict(
-        size=model.latent_size,
-        transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
-        transport_type="gaussian",
-        transformed_latents_from_train=True,
-        make_pd=True,
-        verbose=True,
-        stochastic=False,
-        pg_star=0,
-        persistent=True
-    )
-
     callbacks = [
         LatentTransport(
+            size=model.latent_size,
             transport_dims=(1, 2, 3),
             diag=False,
             logging_prefix="mat_stochastic",
             **transport_kwargs
         ),
         LatentTransport(
+            size=model.latent_size,
             transport_dims=(1, 2, 3),
             diag=True,
             logging_prefix="diag_stochastic",
             **transport_kwargs
         ),
         LatentTransport(
+            size=model.latent_size,
             transport_dims=(1,),
             diag=False,
             logging_prefix="mat_stochastic_per_needle",
             **transport_kwargs
         ),
         LatentTransport(
+            size=model.latent_size,
             transport_dims=(2, 3),
             diag=False,
             logging_prefix="mat_stochastic_per_channel",
@@ -94,7 +99,8 @@ def test_vae_latent_transport(prog_bar=False, gpus=None):
     trainer = Trainer(
         max_epochs=_MAX_EPOCH,
         enable_progress_bar=prog_bar,
-        gpus=gpus,
+        accelerator='auto',
+        devices='auto',
         callbacks=callbacks,
         num_sanity_val_steps=0,
         logger=False
@@ -107,6 +113,8 @@ def test_vae_latent_transport(prog_bar=False, gpus=None):
             res = callback.test_metrics.compute()
             assert list(res.values())[0] > _PSNR_PERFORMANCE
 
+    print('VAE CNN Transport test success')
+
 
 if __name__ == "__main__":
-    test_vae_latent_transport(True, 1)
+    test_vae_latent_transport(True)

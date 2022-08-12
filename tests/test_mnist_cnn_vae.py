@@ -24,7 +24,7 @@ from ot_vae_lightning.prior import GaussianPrior
 from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import CNN, AutoEncoder
 
-_PSNR_PERFORMANCE = 13
+_PSNR_PERFORMANCE = 14
 _MAX_EPOCH = 2
 
 
@@ -43,7 +43,8 @@ def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):
         in_resolution,
         latent_resolution,
         capacity=8,
-        down_sample=True
+        down_sample=True,
+        residual=True
     )
 
     decoder = CNN(  # Simple nn.Module
@@ -52,7 +53,8 @@ def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):
         latent_resolution,
         in_resolution,
         capacity=8,
-        up_sample=True
+        up_sample=True,
+        residual=True
     )
 
     model = VAE(  # LightningModule
@@ -75,11 +77,13 @@ def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):
 
     inference("vanilla_vae_encoder_decoder.ckpt")
 
+    print('VAE CNN encoder + decoder MNIST test success')
 
-def test_vae_autoencoder_training(prog_bar=False, gpus=None):
+
+def test_vae_autoencoder_training(prog_bar=False):
     seed_everything(42)
 
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
+    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
     datamodule = MNIST32(train_batch_size=50)
 
     in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
@@ -92,7 +96,8 @@ def test_vae_autoencoder_training(prog_bar=False, gpus=None):
         latent_resolution,
         capacity=8,
         double_encoded_features=True,
-        down_up_sample=True
+        down_up_sample=True,
+        residual=True
     )
 
     model = VAE(
@@ -120,6 +125,8 @@ def test_vae_autoencoder_training(prog_bar=False, gpus=None):
     # Partial checkpoint loading
     trainer.save_checkpoint("vanilla_vae_autoencoder.ckpt", weights_only=True)
 
+    print('VAE CNN autoencoder MNIST test success')
+
     checkpoints = dict(
         encoder=PartialCheckpoint("vanilla_vae_autoencoder.ckpt", "autoencoder.encoder"),
         decoder=PartialCheckpoint("vanilla_vae_autoencoder.ckpt", "autoencoder.decoder")
@@ -131,7 +138,8 @@ def test_vae_autoencoder_training(prog_bar=False, gpus=None):
         in_resolution,
         latent_resolution,
         capacity=8,
-        down_sample=True
+        down_sample=True,
+        residual=True
     )
 
     decoder = CNN(  # Simple nn.Module
@@ -140,7 +148,8 @@ def test_vae_autoencoder_training(prog_bar=False, gpus=None):
         latent_resolution,
         in_resolution,
         capacity=8,
-        up_sample=True
+        up_sample=True,
+        residual=True
     )
 
     vae = VAE(
@@ -156,9 +165,11 @@ def test_vae_autoencoder_training(prog_bar=False, gpus=None):
     results = trainer.test(vae, datamodule)
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
+    print('VAE CNN partial loading test success')
 
-def inference(ckpt_path, prog_bar=False, gpus=None):
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
+
+def inference(ckpt_path, prog_bar=False):
+    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
 
     # Inference
     vae = VAE.load_from_checkpoint(ckpt_path)
@@ -201,13 +212,14 @@ def inference(ckpt_path, prog_bar=False, gpus=None):
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
 
-def test_inference(prog_bar=False, gpus=None):
-    inference("vanilla_vae_encoder_decoder.ckpt", prog_bar, gpus)
-    inference("vanilla_vae_autoencoder.ckpt", prog_bar, gpus)
+def test_inference(prog_bar=False):
+    inference("vanilla_vae_encoder_decoder.ckpt", prog_bar)
+    inference("vanilla_vae_autoencoder.ckpt", prog_bar)
+
+    print('VAE CNN inference test success')
 
 
 if __name__ == "__main__":
-    pbar, gpu = True, 1
-    test_vae_encoder_decoder_training(pbar, gpu)
-    test_vae_autoencoder_training(pbar, gpu)
-    test_inference(pbar, gpu)
+    test_vae_encoder_decoder_training(True)
+    test_vae_autoencoder_training(True)
+    test_inference(True)

@@ -12,8 +12,9 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 ************************************************************************************************************************
 """
 
-from typing import Tuple
+from typing import Tuple, Optional
 from abc import ABC, abstractmethod
+from math import cos, pi
 
 import torch
 from torch import Tensor
@@ -26,12 +27,13 @@ class Prior(nn.Module, ABC):
     """
     Prior abstract class.
     """
-    def __init__(self, loss_coeff: float = 1.):
+    def __init__(self, loss_coeff: float = 1., annealing_steps: int = 0):
         """
         :param loss_coeff: balancing coefficient of the prior loss
         """
         super().__init__()
         self._loss_coeff = loss_coeff
+        self.annealing_steps = annealing_steps
 
     @abstractmethod
     def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
@@ -46,17 +48,15 @@ class Prior(nn.Module, ABC):
         pass
 
     @staticmethod
-    def empirical_reverse_kl(
-            p: Distribution,
-            q: Distribution,
-            z: Tensor=None
-    ) -> Tensor:
+    def empirical_reverse_kl(p: Distribution, q: Distribution, z: Optional[Tensor] = None) -> Tensor:
         return q.log_prob(z) - p.log_prob(z)
 
     @property
     def loss_coeff(self):
         return self._loss_coeff
 
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor, step: int) -> Tuple[Tensor, Tensor]:
         z, loss = self.encode(x)
-        return z, loss * self.loss_coeff
+        coeff = self.loss_coeff * (0.5 * cos(pi * (step / self.annealing_steps + 1)) + 0.5)\
+            if self.annealing_steps > step else self.loss_coeff
+        return z, loss * coeff

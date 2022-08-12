@@ -12,20 +12,21 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 ************************************************************************************************************************
 """
 from typing import Tuple, Optional, Dict, List, Union
+from functools import partial
 
 import torch
 from torch import Tensor
 from torchvision.transforms.transforms import GaussianBlur
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch_lightning.callbacks import RichProgressBar
 from pytorch_lightning.cli import LightningCLI
 from torchmetrics import MetricCollection
-from ot_vae_lightning.data import MNIST32, MNIST, CIFAR10
+from ot_vae_lightning.data import MNIST32, MNIST, CIFAR10, FFHQ128
 from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.model.base import BaseModule, PartialCheckpoint, inference_preprocess, inference_postprocess
 from ot_vae_lightning.utils import Collage
 from ot_vae_lightning.ot import LatentTransport
+import ot_vae_lightning.utils as utils
 
 
 class VAE(BaseModule):
@@ -44,12 +45,13 @@ class VAE(BaseModule):
     def __init__(self,
                  prior: Prior,
                  metrics: Optional[MetricCollection] = None,
+                 checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
                  autoencoder: Optional[nn.Module] = None,
                  encoder: Optional[nn.Module] = None,
                  decoder: Optional[nn.Module] = None,
                  learning_rate: float = 1e-3,
                  plateau_metric_monitor: str = None,
-                 checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
+                 expansion: int = 1,
                  ) -> None:
         """
         Variational Auto Encoder with custom Prior
@@ -91,13 +93,19 @@ class VAE(BaseModule):
             # Don't set self.encoder and self.decoder in order for partial checkpoints loading to not be ambiguous
             self.autoencoder = autoencoder
         else:
-            assert encoder is not None and decoder is not None
+            assert encoder is not None
+            assert decoder is not None
             # Don't set self.autoencoder in order for partial checkpoints loading to not be ambiguous
             self.encoder = encoder
             self.decoder = decoder
 
         self.prior = prior
-        self.loss = self.loss_func
+
+        self.loss = self.elbo
+
+        self._expand = partial(utils.replicate_batch, n=self.hparams.expansion)
+        self._reduce_mean = partial(utils.mean_replicated_batch, n=self.hparams.expansion)
+        self._reduce_std = partial(utils.std_replicated_batch, n=self.hparams.expansion)
 
     def batch_preprocess(self, batch) -> Batch:
         x, y = batch
@@ -105,8 +113,8 @@ class VAE(BaseModule):
 
     @inference_postprocess
     @inference_preprocess
-    def forward(self, x: Tensor) -> Tensor:
-        z = self.encode(x, no_preprocess_override=True)
+    def forward(self, x: Tensor, expand: bool = False) -> Tensor:
+        z = self.encode(x, no_preprocess_override=True, expand=expand)
         x_hat = self.decode(z, no_postprocess_override=True)
         return x_hat
 
@@ -116,16 +124,24 @@ class VAE(BaseModule):
             return opt
         mode = 'max' if self.val_metrics[self.hparams.plateau_metric_monitor].higher_is_better else 'min'
         name = self.val_metrics.prefix + self.hparams.plateau_metric_monitor
-        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode, 0.5, 20, True)
-        return {"optimizer": opt, "scheduler": sched, "monitor": name}
+        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode=mode, factor=0.5, patience=20, verbose=True, threshold=0.2
+        )
+        return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "monitor": name}}
 
-    def loss_func(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
-        z, prior_loss = self.encode(batch['samples'], return_prior_loss=True)
+    def elbo(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
+        samples, targets = batch['samples'], batch['targets']
+        batch_size = samples.size(0)
+
+        z, prior_loss = self.encode(samples, return_prior_loss=True, expand=True)
         x_hat = self.decode(z)
-        batch['preds'], batch['latents'] = x_hat, z
+        x_hat_mean = self._reduce_mean(x_hat)
 
         prior_loss = prior_loss.mean()
-        recon_loss = F.mse_loss(x_hat, batch['targets'], reduction="none").sum(dim=(1, 2, 3)).mean()
+        if self.prior.empirical_kl:
+            recon_loss = F.mse_loss(x_hat_mean, targets)
+        else:
+            recon_loss = F.mse_loss(x_hat_mean, targets, reduction="none").sum(dim=(1, 2, 3)).mean()
 
         loss = recon_loss + prior_loss
         logs = {
@@ -133,6 +149,7 @@ class VAE(BaseModule):
             'train/loss/recon': recon_loss.item(),
             'train/loss/prior': prior_loss.item()
         }
+        batch['preds'], batch['latents'], batch['preds_mean'] = x_hat[:batch_size], z, x_hat_mean
         return loss, logs, batch
 
     @property
@@ -145,13 +162,18 @@ class VAE(BaseModule):
         return self.prior.out_size(enc_out)
 
     @inference_preprocess
-    def encode(self, x: Tensor, return_prior_loss: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+    def encode(self, x: Tensor, return_prior_loss: bool = False, expand: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
         if hasattr(self, 'autoencoder'):
             encodings = self.autoencoder.encode(x)
         else:
             assert hasattr(self, 'encoder')
             encodings = self.encoder(x)
-        z, prior_loss = self.prior(encodings)
+
+        if expand:
+            encodings = self._expand(encodings)
+
+        z, prior_loss = self.prior(encodings, step=self.global_step)
+
         if return_prior_loss:
             assert not self.inference, 'The prior loss cannot be returned when the model is in inference mode'
             return z, prior_loss
@@ -172,9 +194,11 @@ class VAE(BaseModule):
 
     @torch.no_grad()
     def reconstruction(self, batch: Batch) -> List[Tensor]:
-        x = batch['targets']
-        x_hat = self(batch['samples'])
-        return [x, x_hat]
+        x, t = batch['samples'], batch['targets']
+        x_hat = self(x, expand=True)
+        x_hat_mean, x_hat_std = self._reduce_mean(x_hat), self._reduce_std(x_hat)
+        realizations = [x_hat[x.size(0) * i:x.size(0) * (i + 1)] for i in range(self.hparams.expansion)]
+        return [t, x_hat_mean] + realizations + [x_hat_std]
 
     @torch.no_grad()
     def generation(self, batch: Batch) -> List[Tensor]:
@@ -190,7 +214,8 @@ class VAE(BaseModule):
 if __name__ == '__main__':
     cli = LightningCLI(VAE, MNIST,
                        trainer_defaults=dict(default_root_dir='.'),
-                       run=False, save_config_overwrite=True)
+                       run=False, save_config_overwrite=True,
+                       )
 
     transport_kwargs = dict(
         size=cli.model.latent_size,
@@ -204,35 +229,6 @@ if __name__ == '__main__':
 
     callbacks = [
         Collage(),
-        # RichProgressBar(),
-        # LatentTransport(
-        #     transport_dims=(1, 2, 3),
-        #     diag=True,
-        #     stochastic=False,
-        #     logging_prefix="diag_deterministic",
-        #     **transport_kwargs
-        # ),
-        # LatentTransport(
-        #     transport_dims=(1, 2, 3),
-        #     diag=False,
-        #     stochastic=False,
-        #     logging_prefix="mat_deterministic",
-        #     **transport_kwargs
-        # ),
-        # LatentTransport(
-        #     transport_dims=(1, 2, 3),
-        #     diag=False,
-        #     stochastic=True,
-        #     logging_prefix="mat_stochastic",
-        #     **transport_kwargs
-        # ),
-        # LatentTransport(
-        #     transport_dims=(1, 2, 3),
-        #     diag=True,
-        #     stochastic=True,
-        #     logging_prefix="diag_stochastic",
-        #     **transport_kwargs
-        # ),
         LatentTransport(
             transport_dims=(1,),
             diag=False,
@@ -247,13 +243,6 @@ if __name__ == '__main__':
             logging_prefix="mat_per_needle_diag",
             **transport_kwargs
         ),
-        # LatentTransport(
-        #     transport_dims=(2, 3),
-        #     diag=False,
-        #     stochastic=True,
-        #     logging_prefix="mat_stochastic_per_channel",
-        #     **transport_kwargs
-        # )
     ]
 
     cli.trainer.callbacks += callbacks

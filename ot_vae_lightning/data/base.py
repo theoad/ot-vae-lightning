@@ -121,9 +121,7 @@ def dataset_split(
     """
     length = len(datasets[0])   # type: ignore[arg-type]
     for d in datasets:
-        assert len(d) == length,\
-            f"The datasets are expected to all have the same size. "\
-            f"Found {length} and {len(d)}"  # type: ignore[arg-type]
+        assert len(d) == length, f"The datasets are expected to all have the same size. Found {length} and {len(d)}"  # type: ignore[arg-type]
 
     if isinstance(split, float):
         if split > 1 or split < 0:

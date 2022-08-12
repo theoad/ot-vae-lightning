@@ -82,18 +82,3 @@ class Collage(Callback):
     ) -> None:
         if batch_idx == 0 and trainer.is_global_zero:
             self.log_images(trainer, pl_module, batch, 'tes')
-
-    # def on_train_batch_end(
-    #     self,
-    #     trainer: "pl.Trainer",
-    #     pl_module: "pl.LightningModule",
-    #     outputs: STEP_OUTPUT,
-    #     batch: Any,
-    #     batch_idx: int,
-    #     unused: int = 0,
-    # ) -> None:
-    #     if trainer.global_step % trainer.log_every_n_steps == 0 and trainer.is_global_zero:
-    #         pl_module.eval()
-    #         with torch.no_grad():
-    #                 self.log_images(trainer, pl_module, batch, 'train')
-    #         pl_module.train()

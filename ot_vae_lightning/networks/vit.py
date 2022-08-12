@@ -13,7 +13,7 @@ Inspired from: `lucidrains' <https://github.com/lucidrains/vit-pytorch>`_ implem
 
 ************************************************************************************************************************
 """
-from typing import Union, Tuple, Optional
+from typing import Union, Tuple, Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -47,11 +47,13 @@ class ViT(nn.Module):
             dim_head: int = 64,
             dropout: float = 0.1,
             emb_dropout: float = 0.,
-            n_embed_tokens: Optional[int] = 1,
-            n_input_tokens: Optional[int] = None,
-            n_output_tokens: Optional[int] = None,
+            n_embed_tokens: Optional[Union[int, str]] = 1,
+            n_input_tokens: Optional[Union[int, str]] = None,
+            output_tokens: Union[str, Sequence[str]] = 'embed',  # 'embed', 'input', 'class'
             patch_to_embed: bool = True,
-            embed_to_patch: bool = False
+            embed_to_patch: bool = False,
+            num_classes: Optional[int] = None,
+            mask_prob: float = 0.,
     ):
         """
         Initialize a classic ViT, generalized to support both encoding and decoding.
@@ -69,8 +71,7 @@ class ViT(nn.Module):
         :param n_embed_tokens: the number of additional tokens (like cls token) to add to the input (default=1).
         :param n_input_tokens: the number of input tokens - relevant when decoding -. If ``None``, will be set to the
                                number of patches (default=None).
-        :param n_output_tokens: the number of tokens outputted by the network. The additional embedding tokens are
-                                returned first. If ``None``, will be set to the total number of tokens (default=None).
+        :param output_tokens: the type of tokens outputted by the network.
         :param patch_to_embed: If ``True``, maps the image patches to the token space via a linear layer (classic ViT).
         :param embed_to_patch: If ``True``, maps the output tokens to the patch space via a linear layer.
         """
@@ -85,7 +86,18 @@ class ViT(nn.Module):
         num_patches, patch_dim = n_patch_h * n_patch_w, channels * patch_height * patch_width
         n_embed_tokens = num_patches if n_embed_tokens is None else n_embed_tokens
         n_input_tokens = num_patches if n_input_tokens is None else n_input_tokens
-        n_output_tokens = n_embed_tokens if n_output_tokens is None else n_output_tokens
+        n_class_tokens = int(num_classes is not None)
+        total_num_tokens = n_embed_tokens + n_class_tokens + n_input_tokens
+        token_indices = {
+            'embed': list(range(n_embed_tokens)),
+            'class': list(range(n_embed_tokens, n_embed_tokens + n_class_tokens)),
+            'input': list(range(n_embed_tokens + n_class_tokens, total_num_tokens))
+        }
+        output_tokens = [output_tokens] if isinstance(output_tokens, str) else output_tokens
+        self.output_tokens_indices = []
+        for token_type in token_indices.keys():
+            if token_type in output_tokens:
+                self.output_tokens_indices += token_indices[token_type]
 
         self.patch_to_embed = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
@@ -98,22 +110,50 @@ class ViT(nn.Module):
         ) if embed_to_patch else nn.Identity()
 
         self.embed_token = nn.Parameter(torch.randn(1, n_embed_tokens, dim)) if n_embed_tokens > 0 else None
+        self.class_token = nn.Embedding(num_classes, dim) if n_class_tokens > 0 else None
+        self.pos_embedding = nn.Parameter(torch.randn(1, total_num_tokens, dim))
         self.emb_dropout = nn.Dropout(emb_dropout)
-        self.pos_embedding = nn.Parameter(torch.randn(1, n_input_tokens + n_embed_tokens, dim))
+
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
 
-        self.n_output_tokens = n_output_tokens
-        self.out_size = torch.Size([n_output_tokens, dim]) if not embed_to_patch else \
-            torch.Size([channels, image_height, image_width])
+        if embed_to_patch:
+            self.out_size = torch.Size([channels, image_height, image_width])
+            assert len(self.output_tokens_indices) == num_patches, """flow assertion error: expected the number of 
+            returned tokens to match the number of patches when `embed_to_patch` is on."""
+        else:
+            self.out_size = torch.Size([len(self.output_tokens_indices), dim])
 
-    def forward(self, x: Tensor) -> Tensor:
+        # self.mask_prob = mask_prob
+        # self.mask_token = nn.Parameter(torch.randn(1, 1, dim)) if mask_prob > 0 else None
+
+    def forward(self, x: Tensor, y: Optional[Tensor] = None) -> Tensor:
         x = self.patch_to_embed(x)
 
-        embed_token = repeat(self.embed_token, '1 n d -> b n d', b=x.size(0))
-        x = torch.cat((embed_token, x), dim=1)
-        x += self.pos_embedding
+        if self.embed_token is not None:
+            embed_token = repeat(self.embed_token, '1 n d -> b n d', b=x.size(0))
+            x = torch.cat((embed_token, x), dim=1)
+
+        if self.class_token is not None and y is not None:
+            x = torch.cat((x, self.class_token(y).unsqueeze(1)), dim=1)
+            x += self.pos_embedding
+
         x = self.emb_dropout(x)
         x = self.transformer(x)
-        x = x[:, :self.n_output_tokens]
+        x = x[:, self.output_tokens_indices]
         x = self.embed_to_patch(x)
         return x
+
+    # def drop_tokens(self, tokens: Tensor) -> Tuple[Tensor, Optional[Tuple[Tensor, Tensor]]]:
+    #     if self.mask_prob <= 0:
+    #         return tokens, None
+    #     b, n, _ = tokens.shape
+    #     num_masked = int(self.mask_prob * n)
+    #     rand_indices = torch.rand(b, n, device=tokens.device).argsort(dim=-1)
+    #     masked_indices, unmasked_indices = rand_indices[:, :num_masked], rand_indices[:, num_masked:]
+    #     batch_range = torch.arange(b, device=tokens.device)[:, None]
+    #     tokens = tokens[batch_range, unmasked_indices]
+    #     return tokens, (masked_indices, unmasked_indices)
+    #
+    # def add_masked_tokens(self, tokens: Tensor, drop_indices: Optional[Tuple[Tensor, Tensor]]) -> Tensor:
+    #     masked_indices, unmasked_indices = drop_indices
+

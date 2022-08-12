@@ -111,7 +111,8 @@ class FFHQ128(TorchvisionDatamodule):
         super().__init__(
             *args, **kwargs,
             dataset_name='ImageFolder',
-            root=('~/data/thumbnails128x128_train', '~/data/thumbnails128x128_test'),
+            root=('~/data/ffhq_128_train', '~/data/ffhq_128_test'),
+            download=False,
             train_transform=T.Compose([T.RandomHorizontalFlip(), T.ToTensor()]),
             test_transform=T.ToTensor()
         )

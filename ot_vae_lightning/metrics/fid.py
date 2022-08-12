@@ -47,6 +47,7 @@ class FrechetInceptionDistance(Metric):
     """
 
     higher_is_better: bool = False
+    full_state_update: bool = False
 
     def __init__(
             self,
@@ -96,7 +97,7 @@ class FrechetInceptionDistance(Metric):
     @rank_zero_only
     def prepare_metric(self, pl_module: LightningModule):
         self.reset()
-        dataloader = pl_module.train_dataloader()
+        dataloader = pl_module.trainer.train_dataloader()
         with torch.no_grad():
             for idx, (img, label) in enumerate(dataloader):
                 self.update(img.to(pl_module.device), real=True)
