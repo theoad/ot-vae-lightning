@@ -25,10 +25,12 @@ from torchmetrics import MetricCollection
 
 class PartialCheckpoint:
     """
-    --> Why add a checkpoint loading methods on top of lightning's --ckpt_path ?
-    --> lightning's --ckpt_path loads weights for all attributes in a strict manner as well as
-        hparams, optimizer states, metric states and so on.
-        This custom checkpoint loading method loads only weights for specific attributes.
+    Why add yet another checkpoint loading method on top of lightning's --ckpt_path ?
+    lightning's --ckpt_path loads weights for all attributes in a strict manner as well as
+    hparams, optimizer states, metric states and so on.
+    This custom checkpoint loading method loads only weights for specific attributes.
+    It does not interfere with lightning's --ckpt_path (--resume_from_checkpoint prior to 1.7.0).
+
     """
     def __init__(
             self,
@@ -60,6 +62,13 @@ class PartialCheckpoint:
 
 
 def inference_preprocess(method):
+    """
+    Class method decorator to automatically pre-process inputs using
+    inference transforms loaded from the datamodule that served to train
+    the module when in inference mode.
+
+    Useful for methods that process data like `forward`, `encode`, `predict`, ...
+    """
     @functools.wraps(method)
     def preprocess(self, samples, *args, no_preprocess_override=False, **kwargs):
         if self.inference and not no_preprocess_override:
@@ -69,6 +78,13 @@ def inference_preprocess(method):
 
 
 def inference_postprocess(method):
+    """
+    Class method decorator to automatically pre-process inputs using
+    inference transforms loaded from the datamodule that served to train
+    the module when in inference mode.
+
+    Useful for methods that output data like `forward`, `decode`, `sample`, ...
+    """
     @functools.wraps(method)
     def postprocess(self, *args, no_postprocess_override=False, **kwargs):
         out = method(self, *args, **kwargs)
@@ -130,6 +146,16 @@ class BaseModule(pl.LightningModule, ABC):
         self.inference_postprocess = None  # to be populated by checkpoint loading
         self._inference_flag = False
 
+    @inference_preprocess
+    @inference_postprocess
+    @abstractmethod
+    def forward(self, *args, **kwargs) -> Any:
+        """
+        Same as :meth:`torch.nn.Module.forward()`.
+
+        For more details, see pl.LightningModule documentation.
+        """
+
     @abstractmethod
     def batch_preprocess(self, batch: Any) -> Dict[str, Any]:
         """
@@ -138,16 +164,14 @@ class BaseModule(pl.LightningModule, ABC):
         :param batch: Output of self.train_ds.__getitem__()
         :return: Dictionary (or any key-valued container) with at least the keys `samples` and `targets`
         """
-        pass
 
-    @inference_preprocess
-    @inference_postprocess
     @abstractmethod
-    def forward(self, *args, **kwargs) -> Any:
+    def configure_optimizers(self):
         """
-        Implement as a regular forward
+        Configure training optimizers.
+
+        For more details, see pl.LightningModule documentation.
         """
-        pass
 
     def training_step(self, batch, batch_idx, optimizer_idx=0):
         loss = self.loss[optimizer_idx] if hasattr(self.loss, '__getitem__') else self.loss
@@ -199,10 +223,6 @@ class BaseModule(pl.LightningModule, ABC):
     def on_test_start(self) -> None:
         self._set_inference_transforms()
         return self._prepare_metrics('test')
-
-    @abstractmethod
-    def configure_optimizers(self):
-        pass
 
     def setup(self, stage=None):
         if self.checkpoints is not None:

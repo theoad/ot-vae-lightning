@@ -53,7 +53,6 @@ class ViT(nn.Module):
             patch_to_embed: bool = True,
             embed_to_patch: bool = False,
             num_classes: Optional[int] = None,
-            mask_prob: float = 0.,
     ):
         """
         Initialize a classic ViT, generalized to support both encoding and decoding.
@@ -123,9 +122,6 @@ class ViT(nn.Module):
         else:
             self.out_size = torch.Size([len(self.output_tokens_indices), dim])
 
-        # self.mask_prob = mask_prob
-        # self.mask_token = nn.Parameter(torch.randn(1, 1, dim)) if mask_prob > 0 else None
-
     def forward(self, x: Tensor, y: Optional[Tensor] = None) -> Tensor:
         x = self.patch_to_embed(x)
 
@@ -142,18 +138,3 @@ class ViT(nn.Module):
         x = x[:, self.output_tokens_indices]
         x = self.embed_to_patch(x)
         return x
-
-    # def drop_tokens(self, tokens: Tensor) -> Tuple[Tensor, Optional[Tuple[Tensor, Tensor]]]:
-    #     if self.mask_prob <= 0:
-    #         return tokens, None
-    #     b, n, _ = tokens.shape
-    #     num_masked = int(self.mask_prob * n)
-    #     rand_indices = torch.rand(b, n, device=tokens.device).argsort(dim=-1)
-    #     masked_indices, unmasked_indices = rand_indices[:, :num_masked], rand_indices[:, num_masked:]
-    #     batch_range = torch.arange(b, device=tokens.device)[:, None]
-    #     tokens = tokens[batch_range, unmasked_indices]
-    #     return tokens, (masked_indices, unmasked_indices)
-    #
-    # def add_masked_tokens(self, tokens: Tensor, drop_indices: Optional[Tuple[Tensor, Tensor]]) -> Tensor:
-    #     masked_indices, unmasked_indices = drop_indices
-

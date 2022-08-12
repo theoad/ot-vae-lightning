@@ -14,12 +14,14 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 from typing import Tuple, Optional, Dict, List, Union
 from functools import partial
 
+import wandb
 import torch
 from torch import Tensor
 from torchvision.transforms.transforms import GaussianBlur
 import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning.cli import LightningCLI
+from pytorch_lightning.loggers import WandbLogger
 from torchmetrics import MetricCollection
 from ot_vae_lightning.data import MNIST32, MNIST, CIFAR10, FFHQ128
 from ot_vae_lightning.prior import Prior
@@ -212,10 +214,15 @@ class VAE(BaseModule):
 
 
 if __name__ == '__main__':
-    cli = LightningCLI(VAE, MNIST,
-                       trainer_defaults=dict(default_root_dir='.'),
-                       run=False, save_config_overwrite=True,
-                       )
+    cli = LightningCLI(
+        VAE, MNIST,
+        save_config_filename='cli_config.yaml',
+        save_config_overwrite=True,
+        run=False
+    )
+
+    if isinstance(cli.trainer.logger, WandbLogger):
+        wandb.save(cli.save_config_filename)
 
     transport_kwargs = dict(
         size=cli.model.latent_size,

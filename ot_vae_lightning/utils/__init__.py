@@ -3,7 +3,6 @@ from torch import Tensor
 import torchvision.transforms as T
 import torch.nn as nn
 from ot_vae_lightning.utils.collage import Collage
-from numpy import prod
 
 
 class ToTensor(T.ToTensor):
