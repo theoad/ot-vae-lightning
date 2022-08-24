@@ -19,7 +19,8 @@ from pytorch_lightning import Trainer, seed_everything
 from torchmetrics import MetricCollection
 from torchmetrics.image.psnr import PeakSignalNoiseRatio
 
-from ot_vae_lightning.model import VAE, PartialCheckpoint
+from ot_vae_lightning.utils.partial_checkpoint import PartialCheckpoint
+from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import GaussianPrior
 from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import CNN, AutoEncoder
@@ -28,11 +29,11 @@ _PSNR_PERFORMANCE = 14
 _MAX_EPOCH = 2
 
 
-def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):
+def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
     seed_everything(42)
 
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, gpus=gpus)
-    datamodule = MNIST32(train_batch_size=50)
+    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
+    datamodule = MNIST32(train_batch_size=batch_size)
 
     in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
@@ -80,11 +81,11 @@ def test_vae_encoder_decoder_training(prog_bar=False, gpus=None):
     print('VAE CNN encoder + decoder MNIST test success')
 
 
-def test_vae_autoencoder_training(prog_bar=False):
+def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
     seed_everything(42)
 
     trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
-    datamodule = MNIST32(train_batch_size=50)
+    datamodule = MNIST32(train_batch_size=batch_size)
 
     in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
@@ -168,7 +169,7 @@ def test_vae_autoencoder_training(prog_bar=False):
     print('VAE CNN partial loading test success')
 
 
-def inference(ckpt_path, prog_bar=False):
+def inference(ckpt_path, prog_bar=False, batch_size=50):
     trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
 
     # Inference
@@ -185,7 +186,7 @@ def inference(ckpt_path, prog_bar=False):
         z = vae.encode(x)  # pre-processing is done implicitly
         assert z.shape == torch.Size((10, 128, 1, 1))
 
-        samples = vae.samples(batch_size=5)  # post-processing is done implicitly
+        samples = vae.sample(batch_size=5)  # post-processing is done implicitly
         assert samples.shape == torch.Size((5, 1, 28, 28))
 
         x_hat = vae(x)  # pre-processing and post-processing are done implicitly
@@ -199,9 +200,9 @@ def inference(ckpt_path, prog_bar=False):
         download=True
     )
 
-    dl = DataLoader(raw_mnist, batch_size=50, shuffle=False)
+    dl = DataLoader(raw_mnist, batch_size=batch_size, shuffle=False)
     predictions = trainer.predict(vae, dl)
-    assert predictions[0].shape == torch.Size((50, 1, 28, 28))  # type: ignore[arg-type]
+    assert predictions[0].shape == torch.Size((batch_size, 1, 28, 28))  # type: ignore[arg-type]
 
     psnr = PeakSignalNoiseRatio()
     for i, (x, _) in enumerate(dl):
@@ -212,14 +213,14 @@ def inference(ckpt_path, prog_bar=False):
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
 
-def test_inference(prog_bar=False):
-    inference("vanilla_vae_encoder_decoder.ckpt", prog_bar)
-    inference("vanilla_vae_autoencoder.ckpt", prog_bar)
+def test_inference(prog_bar=False, batch_size=50):
+    inference("vanilla_vae_encoder_decoder.ckpt", prog_bar, batch_size)
+    inference("vanilla_vae_autoencoder.ckpt", prog_bar, batch_size)
 
     print('VAE CNN inference test success')
 
 
 if __name__ == "__main__":
-    test_vae_encoder_decoder_training(True)
-    test_vae_autoencoder_training(True)
-    test_inference(True)
+    test_vae_encoder_decoder_training(True, 50)
+    test_vae_autoencoder_training(True, 50)
+    test_inference(True, 50)

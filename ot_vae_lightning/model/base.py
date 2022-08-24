@@ -11,90 +11,17 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 
 ************************************************************************************************************************
 """
-import os
-import functools
-from typing import Optional, Dict, Any
-from collections import OrderedDict
+from typing import Optional, Dict, Any, Callable
 from abc import ABC, abstractmethod
+import functools
 
-import torch
 import pytorch_lightning as pl
-from pytorch_lightning.utilities.memory import get_model_size_mb
+from pytorch_lightning.cli import LightningCLI
 from torchmetrics import MetricCollection
+from ot_vae_lightning.utils.partial_checkpoint import PartialCheckpoint
 
 
-class PartialCheckpoint:
-    """
-    Why add yet another checkpoint loading method on top of lightning's --ckpt_path ?
-    lightning's --ckpt_path loads weights for all attributes in a strict manner as well as
-    hparams, optimizer states, metric states and so on.
-    This custom checkpoint loading method loads only weights for specific attributes.
-    It does not interfere with lightning's --ckpt_path (--resume_from_checkpoint prior to 1.7.0).
-
-    """
-    def __init__(
-            self,
-            checkpoint_path: str,
-            attr_name: str = None,
-            replace_str: str = "",
-            strict: bool = True,
-            freeze: bool = False
-    ):
-        self.attr_name = attr_name
-        self.checkpoint_path = checkpoint_path
-        self.replace_str = replace_str
-        self.strict = strict
-        self.freeze = freeze
-        assert os.path.exists(checkpoint_path), f'Error: Path {checkpoint_path} not found.'
-
-    @property
-    def state_dict(self):
-        checkpoint = torch.load(self.checkpoint_path)
-        if self.attr_name is None or all([self.attr_name not in k for k in checkpoint['state_dict'].keys()]):
-            return checkpoint['state_dict']
-
-        state_dict = OrderedDict()
-        for key in checkpoint['state_dict'].keys():
-            if self.attr_name == '.'.join(key.split('.')[:self.attr_name.count('.')+1]):
-                state_dict[key.replace(f"{self.attr_name}.", self.replace_str, 1)] = checkpoint['state_dict'][key]
-
-        return state_dict
-
-
-def inference_preprocess(method):
-    """
-    Class method decorator to automatically pre-process inputs using
-    inference transforms loaded from the datamodule that served to train
-    the module when in inference mode.
-
-    Useful for methods that process data like `forward`, `encode`, `predict`, ...
-    """
-    @functools.wraps(method)
-    def preprocess(self, samples, *args, no_preprocess_override=False, **kwargs):
-        if self.inference and not no_preprocess_override:
-            samples = self.inference_preprocess(samples)
-        return method(self, samples, *args, **kwargs)
-    return preprocess
-
-
-def inference_postprocess(method):
-    """
-    Class method decorator to automatically pre-process inputs using
-    inference transforms loaded from the datamodule that served to train
-    the module when in inference mode.
-
-    Useful for methods that output data like `forward`, `decode`, `sample`, ...
-    """
-    @functools.wraps(method)
-    def postprocess(self, *args, no_postprocess_override=False, **kwargs):
-        out = method(self, *args, **kwargs)
-        if self.inference and not no_postprocess_override:
-            out = self.inference_postprocess(out)
-        return out
-    return postprocess
-
-
-class BaseModule(pl.LightningModule, ABC):
+class VisionModule(pl.LightningModule, ABC):
     """
     `PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of an abstract module
 
@@ -108,7 +35,9 @@ class BaseModule(pl.LightningModule, ABC):
             self,
             metrics: Optional[MetricCollection] = None,
             checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
-            metric_on_train: bool = False
+            metric_on_train: bool = False,
+            inference_preprocess: Optional[Callable] = None,
+            inference_postprocess: Optional[Callable] = None,
     ):
         """
         ----------------------------------------------------------------------------------------------------------------
@@ -142,12 +71,10 @@ class BaseModule(pl.LightningModule, ABC):
         self.test_metrics = metrics.clone(prefix='test/metrics/') if metrics is not None else None
         self.train_metrics = metrics.clone(prefix='train/metrics/') if metrics is not None and metric_on_train else None
 
-        self.inference_preprocess = None  # to be populated by checkpoint loading
-        self.inference_postprocess = None  # to be populated by checkpoint loading
+        self.inference_preprocess = inference_preprocess
+        self.inference_postprocess = inference_postprocess
         self._inference_flag = False
 
-    @inference_preprocess
-    @inference_postprocess
     @abstractmethod
     def forward(self, *args, **kwargs) -> Any:
         """
@@ -162,15 +89,7 @@ class BaseModule(pl.LightningModule, ABC):
         Pre-process batch before feeding to self.loss and computing metrics.
 
         :param batch: Output of self.train_ds.__getitem__()
-        :return: Dictionary (or any key-valued container) with at least the keys `samples` and `targets`
-        """
-
-    @abstractmethod
-    def configure_optimizers(self):
-        """
-        Configure training optimizers.
-
-        For more details, see pl.LightningModule documentation.
+        :return: Dictionary (or any key-valued container) with at least the keys `samples` and `targets`.
         """
 
     def training_step(self, batch, batch_idx, optimizer_idx=0):
@@ -190,7 +109,8 @@ class BaseModule(pl.LightningModule, ABC):
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         batch = self.batch_preprocess(batch)
-        out = self.forward(batch['samples'])  # type: ignore[arg-type]
+        kwargs = batch['kwargs'] if 'kwargs' in batch else {}
+        out = self(batch['samples'], **kwargs)
         batch['preds'] = out
         return out
 
@@ -227,18 +147,7 @@ class BaseModule(pl.LightningModule, ABC):
     def setup(self, stage=None):
         if self.checkpoints is not None:
             for attr, partial_ckpt in self.checkpoints.items():
-                self.load_attribute(attr, partial_ckpt)
-
-    def load_attribute(self, attr: str, partial_ckpt: PartialCheckpoint):
-        module = getattr(self, attr)
-        module.load_state_dict(partial_ckpt.state_dict, strict=partial_ckpt.strict)
-        if partial_ckpt.freeze:
-            for p in module.parameters():
-                p.requires_grad = False
-            module.eval()
-        print(f'[info]: self.{attr} [{human_format(sum(p.numel() for p in module.parameters()))} '
-              f'parameters - {int(get_model_size_mb(module))}Mb] loaded successfully '
-              f'{"and freezed" if partial_ckpt.freeze else ""}')
+                partial_ckpt.load_attribute(self, attr)
 
     def _prepare_metrics(self, mode):
         if getattr(self, f'{mode}_metrics') is None: return
@@ -250,7 +159,8 @@ class BaseModule(pl.LightningModule, ABC):
     def _update_metrics(self, batch, batch_idx, mode):
         if getattr(self, f'{mode}_metrics') is None: return
         pbatch = self.batch_preprocess(batch)
-        pbatch['preds'] = self(pbatch['samples'])
+        kwargs = pbatch['kwargs'] if 'kwargs' in pbatch else {}
+        pbatch['preds'] = self(pbatch['samples'], **kwargs)
         getattr(self, f'{mode}_metrics').update(pbatch['preds'], pbatch['targets'])
         return pbatch
 
@@ -289,16 +199,49 @@ class BaseModule(pl.LightningModule, ABC):
     @inference.setter
     def inference(self, boolean: bool):
         if boolean:
-            assert self.inference_preprocess is not None and self.inference_postprocess is not None,\
-                'Tried to set model in inference mode but ' \
-                'self.inference_preprocess or self.inference_postprocess is None'
+            if self.inference_preprocess is None or self.inference_postprocess is None:
+                self._set_inference_transforms()
+            assert self.inference_preprocess is not None,\
+                'Tried to set model in inference mode but self.inference_preprocess is None'
+            assert self.inference_postprocess is not None,\
+                'Tried to set model in inference mode but self.inference_postprocess is None'
         self._inference_flag = boolean
 
+    @staticmethod
+    def preprocess(method):
+        """
+        Class method decorator to automatically pre-process inputs using
+        inference transforms. The transforms are loaded from the datamodule
+        that served in train. They are saved together with the checkpoint and
+        automatically loaded together with the model.
+        Useful for methods that process data like `forward`, `encode`, `predict`, ...
+        """
+        @functools.wraps(method)
+        def wrapper(self, samples, *args, no_preprocess_override=False, **kwargs):
+            if self.inference and not no_preprocess_override:
+                samples = self.inference_preprocess(samples)
+            return method(self, samples, *args, **kwargs)
+        return wrapper
 
-def human_format(num):
-    num = float('{:.3g}'.format(num))
-    magnitude = 0
-    while abs(num) >= 1000:
-        magnitude += 1
-        num /= 1000.0
-    return '{}{}'.format('{:f}'.format(num).rstrip('0').rstrip('.'), ['', 'K', 'M', 'B', 'T'][magnitude])
+    @staticmethod
+    def postprocess(method):
+        """
+        Class method decorator to automatically post-process outputs using
+        inference transforms. The transforms are loaded from the datamodule
+        that served in train. They are saved together with the checkpoint and
+        automatically loaded together with the model.
+        Useful for methods that output data like `forward`, `decode`, `sample`, ...
+        """
+        @functools.wraps(method)
+        def wrapper(self, *args, no_postprocess_override=False, **kwargs):
+            out = method(self, *args, **kwargs)
+            if self.inference and not no_postprocess_override:
+                out = self.inference_postprocess(out)
+            return out
+        return wrapper
+
+
+class VisionCLI(LightningCLI):
+    def add_arguments_to_parser(self, parser):
+        parser.link_arguments("data.inference_preprocess", "model.inference_preprocess", apply_on="instantiate")
+        parser.link_arguments("data.inference_postprocess", "model.inference_postprocess", apply_on="instantiate")

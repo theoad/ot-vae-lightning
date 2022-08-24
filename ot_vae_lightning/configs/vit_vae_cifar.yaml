@@ -1,0 +1,87 @@
+model:
+  metrics:
+    class_path: torchmetrics.MetricCollection
+    init_args:
+      metrics:
+        psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
+  lr_sched_metric: psnr
+  expansion: 4
+  conditional: false
+  checkpoints: null
+  encoder:
+    class_path: ot_vae_lightning.networks.ViT
+    init_args:
+      image_size: 32
+      patch_size: 8
+      dim: 256
+      depth: 4
+      heads: 8
+      mlp_dim: 1024
+      channels: 3
+      dim_head: 64
+      dropout: 0.1
+      emb_dropout: 0.
+      n_embed_tokens: 2
+      n_input_tokens: null
+      output_tokens: embed
+      patch_to_embed: true
+      embed_to_patch: false
+      num_classes: null
+  decoder:
+    class_path: ot_vae_lightning.networks.ViT
+    init_args:
+      image_size: 32
+      patch_size: 8
+      dim: 256
+      depth: 2
+      heads: 4
+      mlp_dim: 1024
+      dim_head: 64
+      channels: 3
+      dropout: 0.1
+      emb_dropout: 0
+      n_embed_tokens: null
+      n_input_tokens: 1
+      output_tokens: embed
+      patch_to_embed: false
+      embed_to_patch: true
+      num_classes: null
+  prior:
+    class_path: ot_vae_lightning.prior.GaussianPrior
+    init_args:
+      loss_coeff: 1
+      reparam_dim: 1
+      empirical_kl: true
+      annealing_steps: 5000
+      fixed_var: false
+#  prior:
+#    class_path: ot_vae_lightning.prior.ConditionalGaussianPrior
+#    init_args:
+#      dim: [1, 256]
+#      loss_coeff: 1
+#      reparam_dim: 1
+#      empirical_kl: true
+#      annealing_steps: 5000
+#      fixed_var: false
+#      num_classes: 10
+#      embedding_ema_decay: null
+data:
+  class_path: ot_vae_lightning.data.CIFAR10
+  init_args:
+    train_val_split: 0.9
+    seed: 42
+    train_batch_size: 50
+    val_batch_size: 512
+    test_batch_size: 512
+    num_workers: 10
+optimizer:
+  lr: 0.001
+  betas:
+    - 0.9
+    - 0.999
+  eps: 1.0e-08
+  weight_decay: 0.1
+lr_scheduler:
+  gamma: 0.99
+  last_epoch: -1
+  verbose: false

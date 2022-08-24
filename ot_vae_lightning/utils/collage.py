@@ -13,35 +13,24 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 """
 from typing import Any, Optional
 import torch
-import pytorch_lightning as pl
 from torchvision.utils import make_grid
+import pytorch_lightning as pl
+from pytorch_lightning.utilities import rank_zero_warn
 from pytorch_lightning.utilities.types import STEP_OUTPUT
 from pytorch_lightning import Callback
-
-
-def list_to_collage(img_list, num_samples):
-    if len(img_list) == 0:
-        return
-    elif len(img_list) == 1:
-        collage_tensor = img_list[0].clamp(0, 1)
-    else:
-        collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
-    collage = make_grid(collage_tensor[:min(collage_tensor.size(0), num_samples)], nrow=1)
-    return collage
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 
 
 class Collage(Callback):
     """
-    `PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a collage callback
-    Adapted from `Lightning Bolts example
-    <https://github.com/Lightning-AI/lightning-bolts/blob/master/pl_bolts/callbacks/vision/sr_image_logger.py>`_
+    `PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a collage callback to easily log images
+    to tensorboard and wandb at the end of validation and test steps.
 
     Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
     .. warning:: Work in progress. This implementation is still being verified.
 
     .. _TheoA: https://github.com/theoad
-
     """
     def __init__(self, log_interval: int = 100, num_samples: int = 8) -> None:
         """
@@ -52,12 +41,42 @@ class Collage(Callback):
         self.log_interval = log_interval
         self.num_samples = num_samples
 
+    @staticmethod
+    def log_method(method):
+        """
+        Decorates a method to mark it as a method which outputs a list of images to log
+        """
+        method.is_collage = True
+        return method
+
     def log_images(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", batch: Any, mode: str = 'val'):
-        for method in pl_module.collage_methods():
-            inputs = pl_module.batch_preprocess(batch)
-            img_list = getattr(pl_module, method)(inputs)
+        if trainer.logger is None:
+            return
+
+        found = False
+
+        for func in dir(pl_module):
+            method = getattr(pl_module, func)
+            if not (callable(method) and hasattr(method, 'is_collage') and method.is_collage): continue
+            found = True
+            img_list = method(pl_module.batch_preprocess(batch))
             collage = list_to_collage(img_list, self.num_samples)
-            trainer.logger.log_image(f'{mode}/collage/{method}', [collage], trainer.global_step)
+            if isinstance(trainer.logger, WandbLogger):
+                trainer.logger.log_image(   # type: ignore[arg-type]
+                    f'{mode}/collage/{func}', [collage], step=trainer.global_step
+                )
+            elif isinstance(trainer.logger, TensorBoardLogger):
+                trainer.logger.experiment.add_image(    # type: ignore[arg-type]
+                    f'{mode}/collage/{func}', collage, global_step=trainer.global_step
+                )
+            else:
+                raise NotImplementedError(f"Image logging for class {type(trainer.logger)} not supported")
+
+        if not found:
+            rank_zero_warn("""
+            `Collage` didn't find any method of the pl_module which is marked a `collage_method` and should have its
+             outputs logged. Use the @Collage.log_method decorator in order to have a method affected by the callback.
+            """)
 
     def on_validation_batch_end(
         self,
@@ -81,4 +100,15 @@ class Collage(Callback):
         unused: Optional[int] = 0,
     ) -> None:
         if batch_idx == 0 and trainer.is_global_zero:
-            self.log_images(trainer, pl_module, batch, 'tes')
+            self.log_images(trainer, pl_module, batch, 'test')
+
+
+def list_to_collage(img_list, num_samples):
+    if len(img_list) == 0:
+        return
+    elif len(img_list) == 1:
+        collage_tensor = img_list[0].clamp(0, 1)
+    else:
+        collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
+    collage = make_grid(collage_tensor[:min(collage_tensor.size(0), num_samples)], nrow=1)
+    return collage

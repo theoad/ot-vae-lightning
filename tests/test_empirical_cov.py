@@ -3,7 +3,7 @@ import torch
 from ot_vae_lightning.ot.matrix_utils import is_spd, STABILITY_CONST
 from ot_vae_lightning.ot.w2_utils import w2_gaussian
 from torch.distributions import MultivariateNormal
-from ot_vae_lightning.model.base import human_format
+from ot_vae_lightning.utils import human_format
 from torch.linalg import vector_norm as norm
 
 

@@ -39,10 +39,10 @@ transport_kwargs = dict(
 )
 
 
-def test_vae_latent_transport(prog_bar=False):
+def test_vae_latent_transport(prog_bar=False, batch_size=50):
     seed_everything(42)
 
-    datamodule = MNIST32(train_batch_size=50)
+    datamodule = MNIST32(train_batch_size=batch_size)
 
     in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 64, 4  # latent vectors will have shape [64, 4, 4]
@@ -117,4 +117,4 @@ def test_vae_latent_transport(prog_bar=False):
 
 
 if __name__ == "__main__":
-    test_vae_latent_transport(True)
+    test_vae_latent_transport(True, 1000)

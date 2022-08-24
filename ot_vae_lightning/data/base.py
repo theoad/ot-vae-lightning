@@ -12,7 +12,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 ************************************************************************************************************************
 """
 from abc import ABC
-from typing import Optional, Union, Sequence
+from typing import Optional, Union, Sequence, Callable
 import torch
 from torch import randperm
 from torch.utils.data import DataLoader, Dataset, Subset
@@ -30,16 +30,17 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
     .. warning:: Work in progress. This implementation is still being verified.
 
     .. _TheoA: https://github.com/theoad
-
     """
+
+    # noinspection PyUnusedLocal
     def __init__(self,
                  num_workers: int = 10,
-                 train_transform: callable = T.ToTensor(),
-                 val_transform: callable = T.ToTensor(),
-                 test_transform: callable = T.ToTensor(),
-                 predict_transform: callable = T.ToTensor(),
-                 inference_preprocess: callable = torch.nn.Identity(),
-                 inference_postprocess: callable = torch.nn.Identity(),
+                 train_transform: Callable = T.ToTensor(),
+                 val_transform: Callable = T.ToTensor(),
+                 test_transform: Callable = T.ToTensor(),
+                 predict_transform: Callable = T.ToTensor(),
+                 inference_preprocess: Callable = lambda x: x,
+                 inference_postprocess: Callable = lambda x: x,
                  train_val_split: float = 0.9,
                  seed: Optional[int] = None,
                  train_batch_size: int = 32,
@@ -66,8 +67,14 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
         :param num_workers: Number of CPUs available
         """
         super().__init__()
-        self.save_hyperparameters(ignore=['train_transform', 'val_transform', 'test_transform', 'predict_transform',
-                                          'inference_preprocess', 'inference_postprocess'])
+        self.save_hyperparameters(ignore=[
+            'train_transform',
+            'val_transform',
+            'test_transform',
+            'predict_transform',
+            'inference_preprocess',
+            'inference_postprocess'
+        ])
         self.train_transform = train_transform
         self.val_transform = val_transform
         self.test_transform = test_transform
@@ -140,4 +147,3 @@ def dataset_split(
     return [
         Subset(d, indices[offset - length: offset]) for d, offset, length in zip(datasets, accumulate(split), split)
     ]
-

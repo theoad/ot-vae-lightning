@@ -121,7 +121,7 @@ with torch.no_grad():
     z = vae.encode(x)  # pre-processing is done implicitly
     assert z.shape == torch.Size((10, 128, 1, 1))
 
-    samples = vae.samples(batch_size=5)  # post-processing is done implicitly
+    samples = vae.sample(batch_size=5)  # post-processing is done implicitly
     assert samples.shape == torch.Size((5, 1, 28, 28))
 
     x_hat = vae(x)  # pre-processing and post-processing are done implicitly
@@ -135,7 +135,7 @@ raw_mnist = MNIST(
     download=True
 )
 dl = DataLoader(raw_mnist, batch_size=250, shuffle=False)
-trainer = Trainer(gpus=..., strategy=...,)  # Use lightning trainer to have powerful distributed inference
+trainer = Trainer(gpus=..., strategy=..., )  # Use lightning trainer to have powerful distributed inference
 predictions = trainer.predict(vae, dl)
 assert predictions[0].shape == torch.Size((250, 1, 28, 28))  # type: ignore[arg-type]
 ```

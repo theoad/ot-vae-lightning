@@ -2,6 +2,7 @@ import torchvision.transforms as T
 from ot_vae_lightning.data.base import BaseDatamodule, dataset_split
 from ot_vae_lightning.data.torchvision_datamodule import TorchvisionDatamodule
 from ot_vae_lightning.utils import UnNormalize, ToTensor
+from ot_vae_lightning.data.progressive_callback import ProgressiveTransform, PgTransform, PgCompose, NOOP
 
 
 class MNIST(TorchvisionDatamodule):

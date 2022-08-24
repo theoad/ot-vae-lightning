@@ -13,6 +13,7 @@ Inspired from: `lucidrains' <https://github.com/lucidrains/vit-pytorch>`_ implem
 
 ************************************************************************************************************************
 """
+import warnings
 from typing import Union, Tuple, Optional, Sequence
 
 import torch
@@ -122,17 +123,23 @@ class ViT(nn.Module):
         else:
             self.out_size = torch.Size([len(self.output_tokens_indices), dim])
 
-    def forward(self, x: Tensor, y: Optional[Tensor] = None) -> Tensor:
+    def forward(self, x: Tensor, labels: Optional[Tensor] = None) -> Tensor:
         x = self.patch_to_embed(x)
 
         if self.embed_token is not None:
             embed_token = repeat(self.embed_token, '1 n d -> b n d', b=x.size(0))
             x = torch.cat((embed_token, x), dim=1)
 
-        if self.class_token is not None and y is not None:
-            x = torch.cat((x, self.class_token(y).unsqueeze(1)), dim=1)
-            x += self.pos_embedding
+        if labels is not None and self.class_token is None:
+            warnings.warn("""given conditional argument `y` but `self.class_token` is None. To enable class-conditioned 
+            ViT, use `vit = ViT(num_classes=10).`""")
+        if self.class_token is not None and labels is None:
+            raise ValueError("`num_classes` specified but conditional input `y` is None. Can't infer the class token.")
+        if self.class_token is not None:
+            assert labels is not None, "Flow assertion error. Expected `y` to not be None"
+            x = torch.cat((x, self.class_token(labels).unsqueeze(1)), dim=1)
 
+        x += self.pos_embedding
         x = self.emb_dropout(x)
         x = self.transformer(x)
         x = x[:, self.output_tokens_indices]

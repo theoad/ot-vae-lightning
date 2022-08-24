@@ -11,7 +11,6 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-
 from typing import Tuple
 import torch
 from torch import Tensor
@@ -36,12 +35,22 @@ class GaussianPrior(Prior):
             empirical_kl: bool = False,
             reparam_dim: int = 1,
             annealing_steps: int = 0,
-            fixed_var: bool = False
+            fixed_var: bool = False,
     ):
-        """
+        r"""
+        Initializes a vanilla Gaussian prior
+
+        .. math::
+
+            q(z|x) = \mathcal{N}(\mu(x), \sigma(x))
+
+            p(z) = \mathcal{N}(0, I)
+
         :param loss_coeff: balancing coefficient of the prior loss
         :param empirical_kl: set to compute the KL using monte-carlo instead of closed-form
         :param reparam_dim: Re-parametrization trick is performed on the specified dimension.
+        :param annealing_steps: the number of cosine annealing steps given to the prior loss to warm-up.
+        :param fixed_var: if ``True``, will fix the re-parametrized distribution to have a unit variance.
         """
         super(GaussianPrior, self).__init__(loss_coeff, annealing_steps)
         self.empirical_kl = empirical_kl
@@ -69,16 +78,18 @@ class GaussianPrior(Prior):
             return size
         reparam_size = list(size)
         reparam_dim = self.reparam_dim - 1 if self.reparam_dim > 0 else self.reparam_dim
-        reparam_size[reparam_dim] //= 2  # re-parametrization trick
+        reparam_size[reparam_dim] //= 2   # re-parametrization trick
         return torch.Size(reparam_size)
 
-    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
         q = self.reparametrization(x)
         p = self.reparametrization(torch.zeros_like(x))
         z = q.rsample()
-        if self.empirical_kl: loss = self.empirical_reverse_kl(p, q, z)
-        else: loss = self.closed_form_reverse_kl(p, q)
+        loss = self.empirical_reverse_kl(p, q, z) if self.empirical_kl else self.closed_form_reverse_kl(p, q)
         return z, loss
 
-    def sample(self, shape, device) -> Tensor:
+    def sample(self, shape: _size, device: torch.device) -> Tensor:   # noqa arguments-differ
         return torch.randn(*shape, device=device)
+
+    def forward(self, x: Tensor, step: int) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
+        return super().forward(x, step)
