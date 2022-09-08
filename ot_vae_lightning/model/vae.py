@@ -12,27 +12,27 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 ************************************************************************************************************************
 """
 import warnings
-from typing import Tuple, Optional, Dict, List, Union, Callable
+import inspect
 import functools
-import numpy as np
+from typing import Tuple, Optional, Dict, List, Union, Callable
 
-import wandb
 import torch
 from torch import Tensor
-from torchvision.transforms.transforms import GaussianBlur
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch_lightning.loggers.wandb import WandbLogger
+from torchvision.transforms.transforms import GaussianBlur
+
 from torchmetrics import MetricCollection
+
+import ot_vae_lightning.data    # noqa: F401
+import ot_vae_lightning.utils as utils
+import ot_vae_lightning.data.progressive_callback as progressive
 from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.model.base import VisionModule, VisionCLI
 from ot_vae_lightning.utils import Collage
 from ot_vae_lightning.ot import LatentTransport
-import ot_vae_lightning.utils as utils
-from ot_vae_lightning.data import ProgressiveTransform, PgTransform
-import ot_vae_lightning.data.progressive_callback as progressive
+from ot_vae_lightning.data import TorchvisionDatamodule, ProgressiveTransform, PgTransform
 from ot_vae_lightning.utils.partial_checkpoint import PartialCheckpoint
-import ot_vae_lightning.data    # noqa: F401
 
 
 class VAE(VisionModule):
@@ -47,23 +47,24 @@ class VAE(VisionModule):
     """
 
     Batch = Dict[str, Union[Tensor, Dict]]
-    Conditional = utils.FilterKwargs
-    Conditional.__init__ = functools.partialmethod(Conditional.__init__, arg_keys='labels')
+    filter_kwargs = utils.FilterKwargs
+    filter_kwargs.__init__ = functools.partialmethod(filter_kwargs.__init__, arg_keys='labels')
 
     # noinspection PyUnusedLocal
-    def __init__(self,
-                 prior: Prior,
-                 autoencoder: Optional[nn.Module] = None,
-                 encoder: Optional[nn.Module] = None,
-                 decoder: Optional[nn.Module] = None,
-                 metrics: Optional[MetricCollection] = None,
-                 checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
-                 inference_preprocess: Optional[Callable] = None,
-                 inference_postprocess: Optional[Callable] = None,
-                 learning_rate: float = 1e-3,
-                 lr_sched_metric: Optional[str] = None,
-                 conditional: bool = False,
-                 expansion: int = 1,
+    def __init__(
+            self,
+            prior: Prior,
+            autoencoder: Optional[nn.Module] = None,
+            encoder: Optional[nn.Module] = None,
+            decoder: Optional[nn.Module] = None,
+            metrics: Optional[MetricCollection] = None,
+            checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
+            inference_preprocess: Optional[Callable] = None,
+            inference_postprocess: Optional[Callable] = None,
+            learning_rate: float = 1e-3,
+            lr_sched_metric: Optional[str] = None,
+            conditional: bool = False,
+            expansion: int = 1,
     ) -> None:
         """
         Variational Auto Encoder with custom Prior
@@ -99,7 +100,7 @@ class VAE(VisionModule):
 
         self.loss = self.elbo
         self.prior = prior
-        self._warn_conditional_call('prior.forward'); self._warn_conditional_call('prior.sample')
+        self._warn_call('prior.forward'); self._warn_call('prior.sample')
 
         if autoencoder is not None:
             assert (
@@ -107,16 +108,16 @@ class VAE(VisionModule):
                     hasattr(autoencoder, 'encode') and hasattr(autoencoder, 'decode')
             ), 'Parameter `autoencoder` should be a nn.Module and implement the methods `encode` and `decode`'
             self.autoencoder = autoencoder
-            self._encode_func = autoencoder.encode; self._warn_conditional_call('autoencoder.encode')
-            self._decode_func = autoencoder.decode; self._warn_conditional_call('autoencoder.decode')
+            self._encode_func = autoencoder.encode; self._warn_call('autoencoder.encode')
+            self._decode_func = autoencoder.decode; self._warn_call('autoencoder.decode')
             # Don't set self.encoder and self.decoder in order for checkpoints loading to not be ambiguous
         else:
             assert encoder is not None
             assert decoder is not None
             self.encoder = encoder
             self.decoder = decoder
-            self._encode_func = encoder; self._warn_conditional_call('encoder.forward')
-            self._decode_func = decoder; self._warn_conditional_call('decoder.forward')
+            self._encode_func = encoder; self._warn_call('encoder.forward')
+            self._decode_func = decoder; self._warn_call('decoder.forward')
             # Don't set self.autoencoder in order for checkpoints loading to not be ambiguous
 
         self._expand = functools.partial(utils.replicate_batch, n=expansion)
@@ -126,7 +127,7 @@ class VAE(VisionModule):
     @progressive.transform_batch_tv()
     def batch_preprocess(self, batch) -> Batch:
         samples, labels = batch
-        kwargs = {'labels': labels if self.hparams.conditional else None}
+        kwargs = {'labels': labels} if self.hparams.conditional else {}
         return {
             'samples': samples,
             'targets': samples,
@@ -135,9 +136,9 @@ class VAE(VisionModule):
 
     @VisionModule.postprocess
     @VisionModule.preprocess
-    def forward(self, samples: Tensor, labels: Optional[Tensor] = None, expand: bool = False) -> Tensor:
-        latents = self.encode(samples, labels, expand=expand, no_preprocess_override=True)
-        reconstructions = self.decode(latents, labels, expand_y=expand, no_postprocess_override=True)
+    def forward(self, samples: Tensor, expand: bool = False, **kwargs) -> Tensor:
+        latents = self.encode(samples, expand=expand, no_preprocess_override=True, **kwargs)
+        reconstructions = self.decode(latents, expand_kwargs=expand, no_postprocess_override=True, **kwargs)
         return reconstructions
 
     def configure_optimizers(self):
@@ -146,31 +147,41 @@ class VAE(VisionModule):
 
         name = self.val_metrics.prefix + self.hparams.lr_sched_metric
         mode = 'max' if self.val_metrics[self.hparams.lr_sched_metric].higher_is_better else 'min'
+        # scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, 0.95)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             opt, mode=mode, factor=0.5, patience=5, verbose=True, threshold=1e-1, min_lr=1e-8
         )
         return {"optimizer": opt, "lr_scheduler": {"scheduler": scheduler, "monitor": name}}
 
+    def recon_loss(self, reconstructions: Tensor, targets: Tensor, **kwargs) -> Tensor:
+        recon_loss = (
+            F.mse_loss(reconstructions, targets) if not hasattr(self.prior, 'empirical_kl') or self.prior.empirical_kl else
+            F.mse_loss(reconstructions, targets, reduction="none").sum(dim=(1, 2, 3)).mean()
+        )
+        return recon_loss
+
+    def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
+        return prior_loss.mean()
+
     # noinspection PyUnusedLocal
-    def elbo(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, float], Batch]:
-        samples, labels, targets = batch['samples'], batch['kwargs']['labels'], batch['targets']
+    def elbo(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, Tensor], Batch]:
+        samples, targets, kwargs = batch['samples'], batch['targets'], batch['kwargs']
         batch_size = samples.size(0)
 
-        latents, prior_loss = self.encode(samples, labels, expand=True, return_prior_loss=True)
-        reconstructions = self.decode(latents, labels, expand_y=True)
+        latents, prior_loss = self.encode(samples, expand=True, return_prior_loss=True, **kwargs)
+        reconstructions = self.decode(latents, expand_kwargs=True, **kwargs)
         reconstructions_mean = self._reduce_mean(reconstructions)
 
-        prior_loss = prior_loss.mean()
-        recon_loss = (
-            F.mse_loss(reconstructions_mean, targets) if self.prior.empirical_kl else
-            F.mse_loss(reconstructions_mean, targets, reduction="none").sum(dim=(1, 2, 3)).mean()
-        )
+        prior_loss = self.prior_loss(prior_loss, **kwargs)
+        recon_loss = self.recon_loss(reconstructions_mean, targets, **kwargs)
+
         loss = recon_loss + prior_loss
         logs = {
-            'train/loss/total': loss.item(),
-            'train/loss/recon': recon_loss.item(),
-            'train/loss/prior': prior_loss.item()
+            'train/loss/total': loss,
+            'train/loss/recon': recon_loss,
+            'train/loss/prior': prior_loss
         }
+
         batch['preds'] = reconstructions[:batch_size]
         batch['latents'] = latents[:batch_size]
         batch['preds_mean'] = reconstructions_mean
@@ -189,14 +200,14 @@ class VAE(VisionModule):
     def encode(
             self,
             samples: Tensor,
-            labels: Optional[Tensor] = None,
             return_prior_loss: bool = False,
-            expand: bool = False
+            expand: bool = False,
+            **kwargs
     ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
-        with self.Conditional(self._encode_func) as encode, self.Conditional(self.prior) as prior:
-            encodings = encode(samples, labels=labels)
-            if expand: encodings, labels = self._expand((encodings, labels))
-            latents, prior_loss = prior(encodings, step=self.global_step, labels=labels)
+        with self.filter_kwargs(self._encode_func) as encode, self.filter_kwargs(self.prior) as prior:
+            encodings = encode(samples, **kwargs)
+            if expand: encodings, kwargs = self._expand(encodings), self._expand(kwargs)
+            latents, prior_loss = prior(encodings, **kwargs, step=self.global_step)
 
         if return_prior_loss:
             assert not self.inference, 'The prior loss cannot be returned when the model is in inference mode'
@@ -205,60 +216,71 @@ class VAE(VisionModule):
         return latents
 
     @VisionModule.postprocess
-    def decode(self, latents: Tensor, labels: Optional[Tensor] = None, expand_y: bool = False) -> Tensor:
-        if expand_y:
-            labels = self._expand(labels)
+    def decode(self, latents: Tensor, expand_kwargs: bool = False, **kwargs) -> Tensor:
+        if expand_kwargs:
+            kwargs = self._expand(kwargs)
 
-        with VAE.Conditional(self._decode_func) as decode:
-            return decode(latents, labels=labels)
+        with self.filter_kwargs(self._decode_func) as decode:
+            return decode(latents, **kwargs)
 
     @VisionModule.postprocess
-    def sample(self, batch_size: int, labels: Optional[Tensor] = None) -> Tensor:
-        with VAE.Conditional(self.prior.sample) as sample:
-            latents = sample((batch_size, *self.latent_size), device=self.device, labels=labels)
+    def sample(self, batch_size: int, **kwargs) -> Tensor:
+        with self.filter_kwargs(self.prior.sample) as sample:
+            latents = sample((batch_size, *self.latent_size), device=self.device, **kwargs)
 
-        return self.decode(latents, labels, no_postprocess_override=True)
+        return self.decode(latents, **kwargs, no_postprocess_override=True)
 
     @Collage.log_method
     def reconstruction(self, batch: Batch) -> List[Tensor]:
-        samples, labels, t = batch['samples'], batch['kwargs']['labels'], batch['targets']
+        samples, targets, kwargs = batch['samples'], batch['targets'], batch['kwargs'],
         batch_size = samples.size(0)
-        reconstructions = self(samples, labels, expand=True)
+        reconstructions = self(samples, expand=True, **kwargs)
         reconstructions_mean = self._reduce_mean(reconstructions)
         reconstructions_std = self._reduce_std(reconstructions)
         realizations = [reconstructions[batch_size * i:batch_size * (i + 1)] for i in range(self.hparams.expansion)]
-        return [t, reconstructions_mean, *realizations, reconstructions_std]
+        return [targets, reconstructions_mean, *realizations, reconstructions_std]
 
     @Collage.log_method
     def generation(self, batch: Batch) -> List[Tensor]:
-        samples, labels = batch['samples'], batch['kwargs']['labels']
-        return [self.sample(samples.size(0), labels) for _ in range(4)]
+        samples, kwargs = batch['samples'], batch['kwargs']
+        return self.sample(samples.size(0) * 4, **kwargs).chunk(4, dim=0)
 
-    def _warn_conditional_call(self, method) -> None:
+    def _warn_call(self, method) -> None:
         module = self
         for attr in method.rsplit('.'):
             module = getattr(module, attr)
-        if self.hparams.conditional and not utils.hasarg(module, 'labels'):
-            warnings.warn(f"`conditional` is specified but `{method}` doesn't accept `labels` parameter")
+        args = inspect.signature(self.filter_kwargs.__init__).parameters['arg_keys'].default
+        if isinstance(args, str): args = [args]
+        for arg in args:
+            if not utils.hasarg(module, arg):
+                if arg == 'labels':
+                    if self.hparams.conditional:
+                        warnings.warn(f"""
+                        `conditional` is specified but `{method}` doesn't accept `{arg}` parameter
+                        """)
+                else: warnings.warn(f"""
+                `{arg}` specified as a key-worded argument but `{method}` doesn't accept `{arg}` parameter.
+                """)
 
 
-class VAECli(VisionCLI):
+class VaeCLI(VisionCLI):
     def add_arguments_to_parser(self, parser):
         super().add_arguments_to_parser(parser)
-        parser.add_optimizer_args(torch.optim.Adam)
-        parser.add_lr_scheduler_args(torch.optim.lr_scheduler.ExponentialLR)
+        parser.add_lightning_class_args(Collage, "collage")
+        parser.set_defaults({"collage.log_interval": 100, "collage.num_samples": 8})
+        # parser.add_optimizer_args(torch.optim.Adam)
+        # parser.add_lr_scheduler_args(torch.optim.lr_scheduler.ExponentialLR)
 
 
 if __name__ == '__main__':
-    cli = VAECli(
-        VAE,
+    cli = VaeCLI(
+        VAE, TorchvisionDatamodule,
+        subclass_mode_model=False,
+        subclass_mode_data=True,
         save_config_filename='cli_config.yaml',
         save_config_overwrite=True,
         run=False
     )
-
-    if isinstance(cli.trainer.logger, WandbLogger):
-        wandb.save(cli.save_config_filename)
 
     transport_kwargs = dict(
         size=cli.model.latent_size,
@@ -270,13 +292,12 @@ if __name__ == '__main__':
         pg_star=0,
     )
 
-    ProgressiveGaussianBlur = PgTransform(
-        GaussianBlur, {'sigma': list(zip(np.linspace(10, 0, 50), np.linspace(10, 0, 50)))[:-1]}, kernel_size=5
-    )
+    # ProgressiveGaussianBlur = PgTransform(
+    #     GaussianBlur, {'sigma': list(zip(np.linspace(10, 0, 50), np.linspace(10, 0, 50)))[:-1]}, kernel_size=3
+    # )
 
     callbacks = [
-        Collage(),
-        ProgressiveTransform(ProgressiveGaussianBlur, list(range(50))),
+        # ProgressiveTransform(ProgressiveGaussianBlur, list(range(50))),
         LatentTransport(
             transport_dims=(1,),
             diag=False,

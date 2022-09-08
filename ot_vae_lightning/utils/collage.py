@@ -59,8 +59,8 @@ class Collage(Callback):
             method = getattr(pl_module, func)
             if not (callable(method) and hasattr(method, 'is_collage') and method.is_collage): continue
             found = True
-            img_list = method(pl_module.batch_preprocess(batch))
-            collage = list_to_collage(img_list, self.num_samples)
+            images = method(pl_module.batch_preprocess(batch))
+            collage = self.list_to_collage(images, self.num_samples)
             if isinstance(trainer.logger, WandbLogger):
                 trainer.logger.log_image(   # type: ignore[arg-type]
                     f'{mode}/collage/{func}', [collage], step=trainer.global_step
@@ -102,13 +102,13 @@ class Collage(Callback):
         if batch_idx == 0 and trainer.is_global_zero:
             self.log_images(trainer, pl_module, batch, 'test')
 
-
-def list_to_collage(img_list, num_samples):
-    if len(img_list) == 0:
-        return
-    elif len(img_list) == 1:
-        collage_tensor = img_list[0].clamp(0, 1)
-    else:
-        collage_tensor = torch.cat(img_list, dim=-1).clamp(0, 1)  # concatenate on width dimension
-    collage = make_grid(collage_tensor[:min(collage_tensor.size(0), num_samples)], nrow=1)
-    return collage
+    @staticmethod
+    def list_to_collage(images, num_samples):
+        if len(images) == 0:
+            return
+        elif len(images) == 1:
+            collage_tensor = images[0].clamp(0, 1)
+        else:
+            collage_tensor = torch.cat(images, dim=-1).clamp(0, 1)  # concatenate on width dimension
+        collage = make_grid(collage_tensor[:min(collage_tensor.size(0), num_samples)], nrow=1)
+        return collage

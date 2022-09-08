@@ -1,0 +1,40 @@
+model:
+  init_args:
+    encoder:
+      class_path: ot_vae_lightning.networks.ViT
+      init_args:
+        image_size: 32
+        patch_size: 8
+        dim: 256
+        depth: 6
+        heads: 4
+        mlp_dim: 512
+        channels: 3
+        dim_head: 64
+        dropout: 0.1
+        emb_dropout: 0.
+        n_embed_tokens: 2
+        n_input_tokens: null
+        output_tokens: embed
+        patch_to_embed: true
+        embed_to_patch: false
+        num_classes: null
+    decoder:
+      class_path: ot_vae_lightning.networks.ViT
+      init_args:
+        image_size: 32
+        patch_size: 8
+        dim: 256
+        depth: 6
+        heads: 4
+        mlp_dim: 512
+        dim_head: 64
+        channels: 3
+        dropout: 0.1
+        emb_dropout: 0
+        n_embed_tokens: null
+        n_input_tokens: 1
+        output_tokens: embed
+        patch_to_embed: false
+        embed_to_patch: true
+        num_classes: null

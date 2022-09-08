@@ -76,12 +76,17 @@ data:
     num_workers: 10
 optimizer:
   lr: 0.001
-  betas:
-    - 0.9
-    - 0.999
+  betas: [0.9, 0.999]
   eps: 1.0e-08
   weight_decay: 0.1
 lr_scheduler:
-  gamma: 0.99
-  last_epoch: -1
+  monitor: val/metrics/psnr
+  mode: min
+  factor: 0.1
+  patience: 10
+  threshold: 0.0001
+  threshold_mode: rel
+  cooldown: 0
+  min_lr: 0
+  eps: 1.0e-08
   verbose: false
