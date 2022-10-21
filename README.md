@@ -27,10 +27,7 @@ pip install git+https://github.com/theoad/ot-vae-lightning
 
 Run training
 ```bash
-python model/vae.py \
---config configs/vanilla.yaml \
---config configs/wandb.yaml \
---config configs/vanilla_vae.yaml
+python model/vae.py --config configs/vae/defaults.yaml
 ```
 
 ## Usage
