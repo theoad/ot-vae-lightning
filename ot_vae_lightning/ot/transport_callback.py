@@ -27,7 +27,7 @@ from pytorch_lightning.utilities import rank_zero_warn, move_data_to_device
 from pytorch_lightning import Callback
 
 from ot_vae_lightning.ot import GaussianTransport
-from ot_vae_lightning.utils.collage import list_to_collage
+from ot_vae_lightning.utils.collage import Collage
 
 
 class LatentTransport(Callback):
@@ -370,7 +370,7 @@ class LatentTransport(Callback):
         samples_transported = self._decode(pl_module, self._transport(latents), **kwargs)
         img_list = [transformed, transformed_decoded, samples_transported, samples]
 
-        collage = list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
+        collage = Collage.list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
         return collage
 
     def _val_dist(self):
@@ -438,7 +438,7 @@ class ConditionalLatentTransport(Callback):
             for i in collage_indices:
                 collage.append(self.transports[i]._collage(trainer, pl_module))
 
-        collage = list_to_collage(collage, self.num_samples_to_log)
+        collage = Collage.list_to_collage(collage, self.num_samples_to_log)
 
         if hasattr(trainer.logger, 'log_image'):
             trainer.logger.log_image(self.log_prefix, [collage], trainer.global_step)

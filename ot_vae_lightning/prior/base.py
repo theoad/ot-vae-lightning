@@ -66,7 +66,8 @@ class Prior(nn.Module, ABC):
         return self._loss_coeff
 
     def forward(self, x: Tensor, step: int, **kwargs) -> Tuple[Tensor, Tensor]:
+        annealing = (0.5 * cos(pi * (step / self.annealing_steps + 1)) + 0.5) if self.annealing_steps > step else 1
         z, loss = self.encode(x, **kwargs)   # type: ignore[arg-type]
-        loss *= self.loss_coeff * (0.5 * cos(pi * (step / self.annealing_steps + 1)) + 0.5)\
-            if self.annealing_steps > step else self.loss_coeff
+        if isinstance(loss, dict): loss['loss'] *= self.loss_coeff * annealing
+        else: loss *= self.loss_coeff * annealing
         return z, loss

@@ -1,14 +1,35 @@
+seed_everything: 42
 trainer:
+  enable_checkpointing: true
+  accelerator: auto
+  devices: auto
+  max_epochs: 100
+#  gradient_clip_val: 1.0
+  sync_batchnorm: false
+  precision: 32
+  enable_model_summary: true
+  weights_save_path: null
+  num_sanity_val_steps: 2
+  benchmark: true
   logger:
     class_path: pytorch_lightning.loggers.WandbLogger
     init_args:
       project: ot-vae-lightning
       entity: gip
-      dir: vae
+      dir: dad
       log_model: true
-      name: vit
+      name: defaults
 model:
-  autoencoder: null
+  expansion: 1
+  learning_rate: 1e-3
+  lr_sched_metric: psnr
+  conditional: false
+  checkpoints: null
+  metrics:
+    class_path: torchmetrics.MetricCollection
+    init_args:
+      metrics:
+        psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
   encoder:
     class_path: ot_vae_lightning.networks.ViT
     init_args:
@@ -62,3 +83,12 @@ model:
       separate_key_values: false
       loss_coeff: 0.1
       annealing_steps: 0
+data:
+  class_path: ot_vae_lightning.data.CIFAR10
+  init_args:
+    train_val_split: 0.9
+    seed: 42
+    train_batch_size: 100
+    val_batch_size: 512
+    test_batch_size: 512
+    num_workers: 8

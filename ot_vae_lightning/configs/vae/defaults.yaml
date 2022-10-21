@@ -1,0 +1,65 @@
+seed_everything: 42
+trainer:
+  enable_checkpointing: true
+  accelerator: auto
+  devices: auto
+  max_epochs: 100
+#  gradient_clip_val: 1.0
+  sync_batchnorm: false
+  precision: 32
+  enable_model_summary: true
+  weights_save_path: null
+  num_sanity_val_steps: 2
+  benchmark: true
+  logger:
+    class_path: pytorch_lightning.loggers.WandbLogger
+    init_args:
+      project: ot-vae-lightning
+      entity: gip
+      dir: vae
+      log_model: true
+      name: defaults
+model:
+  expansion: 1
+  learning_rate: 1e-3
+  lr_sched_metric: psnr
+  conditional: false
+  checkpoints: null
+  metrics:
+    class_path: torchmetrics.MetricCollection
+    init_args:
+      metrics:
+        psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
+  prior:
+    class_path: ot_vae_lightning.prior.GaussianPrior
+    init_args:
+      loss_coeff: 0.1
+      reparam_dim: 1
+      empirical_kl: false
+      annealing_steps: 0
+      fixed_var: false
+  autoencoder:
+    class_path: ot_vae_lightning.networks.AutoEncoder
+    init_args:
+      in_features: 3
+      in_resolution: 32
+      latent_features: 256
+      latent_resolution: 1
+      double_encoded_features: true
+      capacity: 32
+      n_layers: 3
+      down_up_sample: 2
+      normalization: batchnorm
+      activation: relu
+      equalized_lr: false
+      dropout: 0.
+      residual: true
+data:
+  class_path: ot_vae_lightning.data.CIFAR10
+  init_args:
+    train_val_split: 0.9
+    seed: 42
+    train_batch_size: 128
+    val_batch_size: 512
+    test_batch_size: 512
+    num_workers: 8

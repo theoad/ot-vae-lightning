@@ -1,7 +1,7 @@
 import inspect
 from copy import copy
 
-from typing import Union, Sequence, Callable, List
+from typing import Union, Sequence, Callable, List, Tuple
 import contextlib
 
 import torch
@@ -137,3 +137,37 @@ def hasarg(callee, arg_name: str):
     func = getattr(callee, 'forward') if isinstance(callee, nn.Module) else callee
     callee_params = inspect.signature(func).parameters.keys()
     return arg_name in callee_params
+
+
+def permute_and_flatten(x: Tensor, permute_dims: Sequence[int], batch_first: bool = True) -> Tensor:
+    remaining_dims = set(range(1, x.dim())).difference(set(permute_dims))
+    if len(remaining_dims) == 0: return x.unsqueeze(0)
+
+    if batch_first: x_rearranged = x.permute(0, *remaining_dims, *permute_dims)
+    else:           x_rearranged = x.permute(*remaining_dims, 0, *permute_dims)
+
+    x_rearranged = x_rearranged.flatten(int(batch_first), len(remaining_dims) - int(not batch_first))
+    return x_rearranged.contiguous()
+
+
+def unflatten_and_unpermute(
+        xr: Tensor,
+        orig_shape: Sequence[int],
+        permute_dims: Sequence[int],
+        batch_first: bool = True
+) -> Tensor:
+    remaining_dims = set(range(1, len(orig_shape))).difference(set(permute_dims))
+    if len(remaining_dims) == 0: return xr.squeeze(0)
+
+    x = xr.unflatten(int(batch_first), [orig_shape[d] for d in remaining_dims])  # type: ignore[arg-type]
+
+    permutation_map = list(range(len(orig_shape)))
+    if not batch_first: permutation_map[0] = len(remaining_dims)
+
+    for dim in range(1, len(orig_shape)):
+        if dim in remaining_dims:
+            permutation_map[dim] = list(remaining_dims).index(dim) + int(batch_first)
+        else:
+            permutation_map[dim] = len(remaining_dims) + 1 + permute_dims.index(dim)
+    x = x.permute(*permutation_map)
+    return x.contiguous()

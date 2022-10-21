@@ -41,11 +41,10 @@ def test_vae_vit_training(prog_bar=False, batch_size=50):
         image_size=32,
         patch_size=8,
         dim=_DIM,
-        depth=6,
+        depth=3,
         heads=4,
         mlp_dim=_DIM * 4,
         channels=3,
-        dim_head=_DIM // 2,
         dropout=0.1,
         emb_dropout=0.,
         num_classes=10
@@ -70,10 +69,10 @@ def test_vae_vit_training(prog_bar=False, batch_size=50):
     )
 
     prior = ConditionalGaussianPrior(
-        dim=[1, _DIM],
+        dim=(1, _DIM),
         num_classes=10,
-        loss_coeff=1,
-        empirical_kl=True,
+        loss_coeff=0.1,
+        empirical_kl=False,
         reparam_dim=1,
         annealing_steps=1000
     )
@@ -114,7 +113,7 @@ def test_vae_vit_training(prog_bar=False, batch_size=50):
     )
 
     trainer.fit(model, datamodule)
-    trainer.save_checkpoint("vanilla_vae_vit.ckpt")
+    trainer.save_checkpoint("conditional_vit.ckpt")
 
     # Test
     model.freeze()

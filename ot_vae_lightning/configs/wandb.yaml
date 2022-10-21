@@ -1,9 +1,0 @@
-trainer:
-  logger:
-    class_path: pytorch_lightning.loggers.WandbLogger
-    init_args:
-      name: dry-run
-      project: ot-vae-lightning
-      entity: gip
-      dir: "."
-      log_model: true

@@ -11,8 +11,11 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
+import os
+import warnings
 from typing import Any, Optional
 import torch
+import torchvision.utils
 from torchvision.utils import make_grid
 import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_warn
@@ -50,9 +53,6 @@ class Collage(Callback):
         return method
 
     def log_images(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", batch: Any, mode: str = 'val'):
-        if trainer.logger is None:
-            return
-
         found = False
 
         for func in dir(pl_module):
@@ -61,7 +61,11 @@ class Collage(Callback):
             found = True
             images = method(pl_module.batch_preprocess(batch))
             collage = self.list_to_collage(images, self.num_samples)
-            if isinstance(trainer.logger, WandbLogger):
+            if trainer.logger is None:
+                warnings.warn('No logger found. Logging locally.')
+                if not os.path.exists('collages'): os.mkdir('collages')
+                torchvision.utils.save_image(collage, f'collages/{str(trainer.global_step).zfill(4)}_{func}.png')
+            elif isinstance(trainer.logger, WandbLogger):
                 trainer.logger.log_image(   # type: ignore[arg-type]
                     f'{mode}/collage/{func}', [collage], step=trainer.global_step
                 )

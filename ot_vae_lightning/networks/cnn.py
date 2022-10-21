@@ -11,27 +11,41 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
+import warnings
 import torch
 from torch import Tensor
 from typing import Union, List, Optional
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.common_types import _size_2_t
 from math import sqrt, log2
 import numpy as np
 from sympy import divisors
 from copy import deepcopy
+from ot_vae_lightning.networks.utils import GaussianFourierProjection, FilterSequential, QKVAttention
 
 
 # ******************************************************************************************************************** #
 
 
 class ConvLayer(nn.Conv2d):
+    """
+    nn.Conv2 Layer that supports:
+    -   residual skip connections
+    -   normalization
+    -   activation
+    -   `equalized learning rate <https://arxiv.org/abs/1710.10196>`_
+    """
+
+    enable_warnings = False
+
     def __init__(
             self,
             in_features: int,
             out_features: int,
 
             # ConvLayer params
+            additional_embed: Optional[int] = None,
             normalization: Optional[str] = None,
             activation: Optional[str] = None,
             equalized_lr: bool = False,
@@ -46,12 +60,6 @@ class ConvLayer(nn.Conv2d):
             bias: bool = True,
     ) -> None:
         """
-        nn.Conv2 Layer that supports:
-            -   residual skip connections
-            -   normalization
-            -   activation
-            -   `equalized learning rate <https://arxiv.org/abs/1710.10196>`_
-
         :param in_features: Number of channels in the input image
         :param out_features: Number of channels produced by the convolution
 
@@ -70,57 +78,118 @@ class ConvLayer(nn.Conv2d):
         :param groups:  Number of blocked connections from input channels to output channels. Default: 1
         """
         super().__init__(in_features, out_features, kernel_size, stride, padding, dilation, groups, bias)
-
-        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
-        self.scale = 1 / np.sqrt(np.prod(self.weight.shape[1:])) if equalized_lr else 1
+        self._dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+        self.conv_scale = 1 / np.sqrt(np.prod(self.weight.shape[1:])) if equalized_lr else 1
+        self._embed_proj = nn.Linear(additional_embed, out_features) if additional_embed is not None else None
+        self.linear_scale = 1 / np.sqrt(out_features) if equalized_lr else 1
 
         if normalization is None or "none" in normalization.lower() or "null" in normalization.lower():
-            self.normalization = nn.Identity()
-        elif "batch" in normalization.lower():
-            self.normalization = nn.BatchNorm2d(out_features)
-        elif "group" in normalization.lower():
-            self.normalization = nn.GroupNorm(div_sqrt(out_features), out_features)
-        elif "instance" in normalization.lower():
-            self.normalization = nn.InstanceNorm2d(out_features)
-        else:
-            raise NotImplementedError(f"normalization={normalization} not supported")
+            self._normalization = nn.Identity()
+        elif "batch" in normalization.lower(): self._normalization = nn.BatchNorm2d(out_features)
+        elif "group" in normalization.lower(): self._normalization = nn.GroupNorm(div_sqrt(out_features // groups), out_features)
+        elif "instance" in normalization.lower(): self._normalization = nn.InstanceNorm2d(out_features)
+        else: raise NotImplementedError(f"normalization={normalization} not supported")
 
         if activation is None or "none" in activation.lower() or "null" in activation.lower():
-            self.activation = nn.Identity()
+            self._activation = nn.Identity()
         elif "leaky" in activation.lower():
-            self.activation = nn.LeakyReLU(0.2)
+            self._activation = nn.LeakyReLU(0.2)
+            # torch.nn.init.kaiming_uniform_(self.weight, a=0.2, mode='fan_in', nonlinearity='leaky_relu')
         elif "relu" in activation.lower():
-            self.activation = nn.ReLU()
+            self._activation = nn.ReLU()
+            torch.nn.init.kaiming_uniform_(self.weight, mode='fan_out', nonlinearity='relu')
         elif "selu" in activation.lower():
-            self.activation = nn.SELU()
+            self._activation = nn.SELU()
+            nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('selu'))
         elif "gelu" in activation.lower():
-            self.activation = nn.GELU()
-        else:
-            raise NotImplementedError(f"activation={activation} not supported")
+            self._activation = nn.GELU()
+            nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('linear'))
+        elif "silu" in activation.lower() or "swish" in activation.lower():
+            self._activation = nn.SiLU()
+            nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('linear'))
+        else: raise NotImplementedError(f"activation={activation} not supported")
 
-    def forward(self, x: Tensor) -> Tensor:
-        out = self._conv_forward(x, self.weight * self.scale, self.bias)
-        out = self.normalization(out)
-        out = self.activation(out)
-        out = self.dropout(out)
+    def _add_embed(self, x: Tensor, embed: Tensor) -> Tensor:
+        if self.enable_warnings:
+            if embed is not None and self._embed_proj is None:
+                warnings.warn("""
+                given conditional argument `embed` but `self.embed_proj` is None.
+                To enable embedding-conditioned layer, use `layer = ConvLayer(additional_embed=...).`
+                """)
+            if self._embed_proj is not None and embed is None:
+                warnings.warn("""
+                `additional_embed` specified in ConvLayer constructor but `embed` is None.
+                ignoring additional `embed` input.
+                """)
+        if self._embed_proj is not None:
+            assert embed is not None, "Flow assertion error. Expected `embed` to not be None"
+            x += F.linear(self._activation(embed), self._embed_proj.weight * self.linear_scale, self._embed_proj.bias)[..., None, None]
+        return x
+
+    def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
+        out = self._add_embed(x, embed)
+        out = self._conv_forward(out, self.weight * self.conv_scale, self.bias)
+        out = self._normalization(out)
+        out = self._activation(out)
+        out = self._dropout(out)
         return out
 
 
 # ******************************************************************************************************************** #
 
 
+class AttentionBlock(nn.Module):
+    """
+    An attention block that allows spatial positions to attend to each other.
+    """
+    def __init__(
+        self,
+        channels: int,
+        heads: int = 1,
+        additional_embed: Optional[int] = None,
+        normalization: Optional[str] = None,
+        equalized_lr: bool = False,
+        groups: int = 1,
+        residual: bool = True
+    ):
+        super().__init__()
+        self.residual = residual
+        if channels % heads != 0:
+            raise ValueError(f"q,k,v channels: {channels} is not divisible by heads: {heads}")
+        self.qkv = ConvLayer(
+            channels, channels * 3, additional_embed, normalization, None, equalized_lr, 0., 1, 1, 0, 1, groups, False
+        )
+        self.attention = QKVAttention(heads)
+        self.proj_out = ConvLayer(channels, channels, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False)
+
+    def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
+        b, c, *spatial = x.shape
+        qkv = self.qkv(x, embed=embed).flatten(2)
+        h = self.attention(qkv).unflatten(2, spatial)
+        h = self.proj_out(h)
+        return x + h if self.residual else h
+
+
+# ******************************************************************************************************************** #
+
+
 class ConvBlock(nn.Module):
+    """
+    Conv block that wraps a series of `n_layers` ConvLayer with up/down sample.
+    """
     def __init__(
             self,
             in_features: int,
             out_features: int,
 
             # ConvBlock params
+            n_attn_heads: int = 0,
             n_layers: int = 2,
             down_sample: Union[bool, int, nn.Module] = False,
             up_sample: Union[bool, int, nn.Module] = False,
 
             # ConvLayer params
+            additional_embed: Optional[int] = None,
             normalization: Optional[str] = "batchnorm",
             activation: Optional[str] = "relu",
             residual: bool = False,
@@ -136,9 +205,6 @@ class ConvBlock(nn.Module):
             bias: bool = True,
     ) -> None:
         """
-        Conv block that wraps a series of `n_layers` ConvLayer with up/down sample.
-        Inspired from `StyleGAN <https://arxiv.org/abs/1812.04948>`_
-
         :param in_features: Number of channels in the input image
         :param out_features: Number of channels produced by the convolution
 
@@ -178,23 +244,23 @@ class ConvBlock(nn.Module):
         else: up_sample = nn.Identity()
 
         super().__init__()
-        self.block = nn.Sequential(
+        self.block = FilterSequential(
             down_sample,
-            ConvLayer(in_features, out_features, normalization, activation, equalized_lr,
-                      dropout, kernel_size, stride, padding, dilation, groups, bias),
-            *([ConvLayer(out_features, out_features, normalization, activation, equalized_lr,
-                         dropout, kernel_size, stride, padding, dilation, groups, bias)] * (n_layers - 1)),
+            ConvLayer(in_features, out_features, additional_embed, normalization, activation, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias),
+            *[ConvLayer(out_features, out_features, additional_embed, normalization, activation, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias)
+              for _ in range((n_layers - 1))],
+            AttentionBlock(out_features, n_attn_heads, additional_embed, normalization, equalized_lr, groups, residual) if n_attn_heads > 0 else nn.Identity(),
             up_sample
         )
 
         self.residual = nn.Sequential(
             deepcopy(down_sample),
-            ConvLayer(in_features, out_features, None, None, equalized_lr, 0., 1, 1, 0, 1, 1, False),
+            ConvLayer(in_features, out_features, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
             deepcopy(up_sample)
         ) if residual else None
 
-    def forward(self, x: Tensor) -> Tensor:
-        out = self.block(x)
+    def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
+        out = self.block(x, embed=embed)
         if self.residual is not None:
             return out + self.residual(x)
         return out
@@ -203,7 +269,16 @@ class ConvBlock(nn.Module):
 # ******************************************************************************************************************** #
 
 
-class CNN(nn.Sequential):
+class CNN(nn.Module):
+    """
+    `PyTorch <https://pytorch.org/>`_ implementation of a modular CNN
+
+    Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
+
+    .. warning:: Work in progress. This implementation is still being verified.
+
+    .. _TheoA: https://github.com/theoad
+    """
     def __init__(
             self,
             # CNN params
@@ -213,6 +288,7 @@ class CNN(nn.Sequential):
             out_resolution: Optional[int] = None,
             intermediate_features: Optional[List[int]] = None,
             capacity: int = 8,
+            max_attn_res: int = 8,
 
             # ConvBlock params
             n_layers: int = 2,
@@ -221,6 +297,7 @@ class CNN(nn.Sequential):
             up_sample: Union[bool, int] = False,
 
             # ConvLayer params
+            additional_embed: Optional[int] = None,
             normalization: Optional[str] = "batchnorm",
             activation: Optional[str] = "relu",
             equalized_lr: bool = False,
@@ -235,18 +312,10 @@ class CNN(nn.Sequential):
             bias: bool = True,
     ) -> None:
         """
-        `PyTorch <https://pytorch.org/>`_ implementation of a modular CNN
-
-        Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
-
-        .. warning:: Work in progress. This implementation is still being verified.
-
-        .. _TheoA: https://github.com/theoad
-
         :param in_features: Number of channels in the input image
         :param out_features: Number of channels produced by the network
         :param in_resolution: Resolution of the input image. Can be left unfilled if `features` is provided
-        :param out_resolution: Resolution of the image produced by the network. Can left unfilled if `features` provided
+        :param out_resolution: Resolution of the image produced by the network. Can be left unfilled if `features` provided
         :param intermediate_features: Optional list of features to create the network. If left unfilled,
                                       number of conv block is inferred from the input/output resolution ratio
                                       and features are doubled with each conv block.
@@ -279,6 +348,9 @@ class CNN(nn.Sequential):
             raise ValueError("Both `up_sample` and `down_sample` are set.")
         if intermediate_features is not None:
             features = [in_features] + intermediate_features + [out_features]
+
+            # setting this such that we don't use attention since we don't know the actual spatial extent.
+            attn_resolutions = [max_attn_res] * len(features)
         else:
             if not all([in_resolution is not None, out_resolution is not None, bool(up_sample) or bool(down_sample)]):
                 raise ValueError("`features` is None. Set `in_resolution`, `out_resolution` and"
@@ -290,6 +362,7 @@ class CNN(nn.Sequential):
                 features, resolutions = get_channel_list(
                     in_features, out_features, in_resolution, out_resolution, down_sample, capacity
                 )
+                attn_resolutions = resolutions[1:]
             elif bool(up_sample):
                 if out_resolution <= in_resolution:
                     raise ValueError("`up_sample` set but `out_resolution` < `in_resolution`")
@@ -298,24 +371,38 @@ class CNN(nn.Sequential):
                     out_features, in_features, out_resolution, in_resolution, up_sample, capacity
                 )
                 features, resolutions = features[::-1], resolutions[::-1]
-            else:
-                raise ValueError("`features` is None. Set `in_resolution`, `out_resolution` and"
-                                 " (`up_sample` or `down_sample`)  to infer number of blocks")
+                attn_resolutions = resolutions[:-1]
+            else: raise NotImplementedError("Should never get here")
+
+        super().__init__()
+        heads = lambda ch, res: div_sqrt(ch) if res <= max_attn_res else 0
 
         self.out_size = torch.Size([out_features, out_resolution, out_resolution])
-        super().__init__(
-            ConvLayer(features[0], features[0], None, None, equalized_lr, 0., 1, 1, 0, 1, 1, False),
-            *[ConvBlock(ic, oc, n_layers, down_sample, up_sample, normalization, activation, residual, equalized_lr,
-                        dropout, kernel_size, stride, padding, dilation, groups, bias)
-              for ic, oc in zip(features[:-1], features[1:])],
-            ConvLayer(features[-1], features[-1], None, None, equalized_lr, 0., 1, 1, 0, 1, 1, False),
+        self.blocks = FilterSequential(
+            ConvLayer(features[0], features[0], None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
+            *[ConvBlock(ic, oc, heads(oc, r), n_layers, down_sample, up_sample, additional_embed, normalization,
+                        activation, residual, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups,
+                        bias) for ic, oc, r in zip(features[:-1], features[1:], attn_resolutions)],
+            ConvLayer(features[-1], features[-1], None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
         )
+
+    def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
+        return self.blocks(x, embed=embed)
 
 
 # ******************************************************************************************************************** #
 
 
 class AutoEncoder(nn.Module):
+    """
+    `PyTorch <https://pytorch.org/>`_ implementation of a modular CNN
+
+    Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
+
+    .. warning:: Work in progress. This implementation is still being verified.
+
+    .. _TheoA: https://github.com/theoad
+    """
     def __init__(
             self,
             # CNN params
@@ -325,6 +412,9 @@ class AutoEncoder(nn.Module):
             latent_resolution: Optional[int] = None,
             intermediate_features: Optional[List[int]] = None,
             capacity: int = 8,
+            max_attn_res: int = 8,
+            num_classes: Optional[int] = None,
+            time_embed_dim: Optional[int] = None,
             double_encoded_features: bool = False,  # for re-parametrization trick
 
             # ConvBlock params
@@ -347,14 +437,6 @@ class AutoEncoder(nn.Module):
             bias: bool = True,
     ) -> None:
         """
-        `PyTorch <https://pytorch.org/>`_ implementation of a modular CNN
-
-        Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
-
-        .. warning:: Work in progress. This implementation is still being verified.
-
-        .. _TheoA: https://github.com/theoad
-
         :param in_features: Number of channels in the input image
         :param latent_features: Number of channels in the latent space
         :param double_encoded_features: if ``True`` will double the number of out_features of the encoder
@@ -388,27 +470,62 @@ class AutoEncoder(nn.Module):
         :param bias: If ``True``, adds a learnable bias to the output. Default: ``True``
         """
         super().__init__()
-        self.latent_size = torch.Size([latent_features * (1 + int(double_encoded_features)),
-                                       latent_resolution, latent_resolution])
+        self.latent_size = torch.Size([latent_features * (1 + int(double_encoded_features)), latent_resolution, latent_resolution])
+        self.class_embed = nn.Embedding(num_classes, latent_features) if num_classes is not None else None
+        self.time_embed = GaussianFourierProjection(time_embed_dim, out_dim=latent_features) if time_embed_dim is not None else None
+        additional_embed = latent_features if self.class_embed is not None and self.time_embed is not None else None
 
-        self.encoder = CNN(in_features, latent_features * (1 + int(double_encoded_features)), in_resolution,
-                           latent_resolution, intermediate_features, capacity, n_layers,
-                           residual, down_up_sample, False, normalization, activation,
-                           equalized_lr, dropout, kernel_size, stride, padding,
-                           dilation, groups, bias)
-        self.decoder = CNN(latent_features, in_features, latent_resolution, in_resolution,
-                           intermediate_features[::-1] if intermediate_features is not None else None,
-                           capacity, n_layers, residual, False, down_up_sample, normalization, activation, equalized_lr,
-                           dropout, kernel_size, stride, padding, dilation, groups, bias)
+        self.encoder = CNN(
+            in_features, latent_features * (1 + int(double_encoded_features)), in_resolution, latent_resolution,
+            intermediate_features, capacity, max_attn_res, n_layers, residual, down_up_sample, False, additional_embed,
+            normalization, activation, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias
+        )
 
-    def encode(self, x: Tensor) -> Tensor:
-        return self.encoder(x)
+        self.decoder = CNN(
+            latent_features, in_features, latent_resolution, in_resolution,
+            intermediate_features[::-1] if intermediate_features is not None else None, capacity, max_attn_res,
+            n_layers, residual, False, down_up_sample, additional_embed, normalization, activation, equalized_lr,
+            dropout, kernel_size, stride, padding, dilation, groups, bias
+        )
 
-    def decode(self, z: Tensor) -> Tensor:
-        return self.decoder(z)
+    def embed(self, labels: Optional[Tensor] = None, time: Optional[Tensor] = None):
+        class_embed, time_embed = None, None
+        if labels is not None and self.class_embed is None:
+            warnings.warn("""
+            given conditional argument `labels` but `self.class_embed` is None.
+            To enable class-conditioned CNNs, use `ae = AutoEncoder(num_classes=...).`
+            """)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.decode(self.encode(x))
+        if self.class_embed is not None and labels is None:
+            raise ValueError("`num_classes` specified but `labels` is None. Can't infer the class embedding.")
+        if self.class_embed is not None:
+            assert labels is not None, "Flow assertion error. Expected `labels` to not be None"
+            class_embed = self.class_embed(labels)
+
+        if time is not None and self.time_embed is None:
+            warnings.warn("""
+            given conditional argument `time` but `self.time_embed` is None.
+            To enable time-conditioned CNNs, use `ae = AutoEncoder(time_dependant=True).`
+            """)
+        if self.time_embed is not None and time is None:
+            raise ValueError("`time_dependant` specified but `time` is None. Can't infer the time embedding.")
+        if self.time_embed is not None:
+            assert time is not None, "Flow assertion error. Expected `time` to not be None"
+            time_embed = self.time_embed(time)
+
+        if class_embed is not None and time_embed is not None: return class_embed + time_embed
+        elif class_embed is not None and time_embed is None: return class_embed
+        elif class_embed is None and time_embed is not None: return time_embed
+        else: return None
+
+    def encode(self, x: Tensor, labels: Optional[Tensor] = None, time: Optional[Tensor] = None) -> Tensor:
+        return self.encoder(x, self.embed(labels, time))
+
+    def decode(self, z: Tensor, labels: Optional[Tensor] = None, time: Optional[Tensor] = None) -> Tensor:
+        return self.decoder(z, self.embed(labels, time))
+
+    def forward(self, x: Tensor, labels: Optional[Tensor] = None, time: Optional[Tensor] = None) -> Tensor:
+        return self.decode(self.encode(x, labels, time), labels, time)
 
 # ******************************************************************************************************************** #
 
@@ -477,8 +594,7 @@ def div_sqrt(n: int) -> int:
     """
     assert isinstance(n, int) and n > 0, f"Error, n must be a positive integer. Given n={n}."
     divs = np.array(divisors(n))
-    if len(divs) < 1:
-        return 1
+    if len(divs) < 1: return 1
     sqrt_idx = np.searchsorted(divs, sqrt(n))
     div = divs[sqrt_idx]
     return div

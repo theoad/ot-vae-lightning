@@ -14,7 +14,8 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 import warnings
 import inspect
 import functools
-from typing import Tuple, Optional, Dict, List, Union, Callable
+from typing import Tuple, Optional, Dict, List, Union, Callable, Any
+import numpy as np
 
 import torch
 from torch import Tensor
@@ -54,6 +55,7 @@ class VAE(VisionModule):
     def __init__(
             self,
             prior: Prior,
+            *,
             autoencoder: Optional[nn.Module] = None,
             encoder: Optional[nn.Module] = None,
             decoder: Optional[nn.Module] = None,
@@ -65,6 +67,7 @@ class VAE(VisionModule):
             lr_sched_metric: Optional[str] = None,
             conditional: bool = False,
             expansion: int = 1,
+            prior_kwargs: Dict[str, Any] = {},
     ) -> None:
         """
         Variational Auto Encoder with custom Prior
@@ -98,7 +101,7 @@ class VAE(VisionModule):
 
         self.save_hyperparameters()
 
-        self.loss = self.elbo
+        self.loss = self.nelbo
         self.prior = prior
         self._warn_call('prior.forward'); self._warn_call('prior.sample')
 
@@ -123,6 +126,7 @@ class VAE(VisionModule):
         self._expand = functools.partial(utils.replicate_batch, n=expansion)
         self._reduce_mean = functools.partial(utils.mean_replicated_batch, n=expansion)
         self._reduce_std = functools.partial(utils.std_replicated_batch, n=expansion)
+        self.prior_kwargs = prior_kwargs
 
     @progressive.transform_batch_tv()
     def batch_preprocess(self, batch) -> Batch:
@@ -164,7 +168,7 @@ class VAE(VisionModule):
         return prior_loss.mean()
 
     # noinspection PyUnusedLocal
-    def elbo(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, Tensor], Batch]:
+    def nelbo(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, Tensor], Batch]:
         samples, targets, kwargs = batch['samples'], batch['targets'], batch['kwargs']
         batch_size = samples.size(0)
 
@@ -207,7 +211,7 @@ class VAE(VisionModule):
         with self.filter_kwargs(self._encode_func) as encode, self.filter_kwargs(self.prior) as prior:
             encodings = encode(samples, **kwargs)
             if expand: encodings, kwargs = self._expand(encodings), self._expand(kwargs)
-            latents, prior_loss = prior(encodings, **kwargs, step=self.global_step)
+            latents, prior_loss = prior(encodings, **kwargs, step=self.global_step, **self.prior_kwargs)
 
         if return_prior_loss:
             assert not self.inference, 'The prior loss cannot be returned when the model is in inference mode'
@@ -268,8 +272,6 @@ class VaeCLI(VisionCLI):
         super().add_arguments_to_parser(parser)
         parser.add_lightning_class_args(Collage, "collage")
         parser.set_defaults({"collage.log_interval": 100, "collage.num_samples": 8})
-        # parser.add_optimizer_args(torch.optim.Adam)
-        # parser.add_lr_scheduler_args(torch.optim.lr_scheduler.ExponentialLR)
 
 
 if __name__ == '__main__':
@@ -292,12 +294,12 @@ if __name__ == '__main__':
         pg_star=0,
     )
 
-    # ProgressiveGaussianBlur = PgTransform(
-    #     GaussianBlur, {'sigma': list(zip(np.linspace(10, 0, 50), np.linspace(10, 0, 50)))[:-1]}, kernel_size=3
-    # )
+    ProgressiveGaussianBlur = PgTransform(
+        GaussianBlur, {'sigma': list(zip(np.linspace(10, 0, 50), np.linspace(10, 0, 50)))[:-1]}, kernel_size=3
+    )
 
     callbacks = [
-        # ProgressiveTransform(ProgressiveGaussianBlur, list(range(50))),
+        ProgressiveTransform(ProgressiveGaussianBlur, list(range(50))),
         LatentTransport(
             transport_dims=(1,),
             diag=False,

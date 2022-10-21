@@ -14,8 +14,10 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 from typing import Optional, Dict, Any, Callable
 from abc import ABC, abstractmethod
 import functools
+import wandb
 
 import pytorch_lightning as pl
+from pytorch_lightning.loggers.wandb import WandbLogger
 from pytorch_lightning.cli import LightningCLI
 from torchmetrics import MetricCollection
 from ot_vae_lightning.utils.partial_checkpoint import PartialCheckpoint
@@ -236,7 +238,10 @@ class VisionModule(pl.LightningModule, ABC):
         def wrapper(self, *args, no_postprocess_override=False, **kwargs):
             out = method(self, *args, **kwargs)
             if self.inference and not no_postprocess_override:
-                out = self.inference_postprocess(out)
+                if isinstance(out, list):
+                    out = [self.inference_postprocess(o) for o in out]
+                else:
+                    out = self.inference_postprocess(out)
             return out
         return wrapper
 
@@ -245,3 +250,9 @@ class VisionCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.link_arguments("data.inference_preprocess", "model.inference_preprocess", apply_on="instantiate")
         parser.link_arguments("data.inference_postprocess", "model.inference_postprocess", apply_on="instantiate")
+
+    def instantiate_trainer(self, **kwargs: Any) -> pl.Trainer:
+        trainer = super().instantiate_trainer(**kwargs)
+        if isinstance(trainer.logger, WandbLogger):
+            wandb.save(self.save_config_filename)
+        return trainer
