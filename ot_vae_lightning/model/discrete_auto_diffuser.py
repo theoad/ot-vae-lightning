@@ -21,8 +21,8 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import ot_vae_lightning.data    # noqa: F401
 from ot_vae_lightning.prior.codebook import CodebookPrior as Vocabulary
-from ot_vae_lightning.model.vae import VAE
-import ot_vae_lightning.utils as utils
+from ot_vae_lightning.model.vae import VAE, VaeCLI
+from ot_vae_lightning.data import TorchvisionDatamodule
 
 
 class DAD(VAE):
@@ -76,7 +76,7 @@ class DAD(VAE):
         ).sum(-1)
 
         loss = vocab_loss + self.hparams.ce_coeff * ce_loss
-        return loss.mean()
+        return super().prior_loss(loss)
 
     @VAE.postprocess
     def sample(self, batch_size: int, **kwargs) -> Tensor:
@@ -85,10 +85,64 @@ class DAD(VAE):
             size=(batch_size, self.n_tokens),
             device=self.device
         )
+
         self.autoregressive_decoder.train()  # TODO: remove
         for i in range(self.n_tokens-1):
             next_token_distribution = Categorical(self.autoregressive_decoder(embed_ind)[:, i].softmax(-1))
             embed_ind[:, i+1] = next_token_distribution.sample()
+        self.autoregressive_decoder.eval()
+
         latents = self.vocabulary.values(embed_ind)
-        latents = utils.unflatten_and_unpermute(latents, self.latent_size, self.vocabulary.embed_dims)
+        # latents = utils.unflatten_and_unpermute(latents, self.latent_size, self.vocabulary.embed_dims)
         return self.decode(latents, **kwargs, no_postprocess_override=True)
+
+
+class DadCLI(VaeCLI):
+    def add_arguments_to_parser(self, parser):
+        super().add_arguments_to_parser(parser)
+        parser.link_arguments(
+            "data.IMG_SIZE",
+            "model.autoregressive_decoder.init_args.image_size",
+            apply_on="instantiate"
+        )
+
+        parser.link_arguments(
+            "model.encoder.init_args.dim",
+            "model.autoregressive_decoder.init_args.dim",
+            apply_on="instantiate"
+        )
+
+        parser.link_arguments(
+            "model.encoder.total_num_tokens",
+            "model.decoder.init_args.n_input_tokens",
+            apply_on="instantiate"
+        )
+
+        parser.link_arguments(
+            "model.encoder.total_num_tokens",
+            "model.autoregressive_decoder.init_args.n_input_tokens",
+            apply_on="instantiate"
+        )
+
+        parser.link_arguments(
+            "model.vocabulary.num_embeddings",
+            "model.autoregressive_decoder.init_args.vocab_size",
+            apply_on="instantiate"
+        )
+
+        parser.link_arguments(
+            "model.encoder.out_size",
+            "model.vocabulary.init_args.latent_size",
+            apply_on="instantiate"
+        )
+
+
+if __name__ == '__main__':
+    cli = DadCLI(
+        DAD, TorchvisionDatamodule,
+        subclass_mode_model=False,
+        subclass_mode_data=True,
+        save_config_filename='cli_config.yaml',
+        save_config_overwrite=True,
+        run=True
+    )

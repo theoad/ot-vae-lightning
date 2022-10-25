@@ -35,6 +35,10 @@ class TorchvisionDatamodule(BaseDatamodule):
     .. _TheoA: https://github.com/theoad
 
     """
+
+    IMG_SIZE = None
+
+    # noinspection PyUnusedLocal
     def __init__(self,
                  dataset_name: TvDataset,
                  root: Union[str, Tuple[str, str]],
@@ -49,9 +53,9 @@ class TorchvisionDatamodule(BaseDatamodule):
                  train_val_split: float = 0.9,
                  seed: Optional[int] = None,
                  train_batch_size: int = 32,
-                 val_batch_size: int = 256,
-                 test_batch_size: int = 256,
-                 predict_batch_size: int = 256,
+                 val_batch_size: int = 32,
+                 test_batch_size: int = 32,
+                 predict_batch_size: int = 32,
                  ) -> None:
         """
         Lightning DataModule form MNIST dataset

@@ -14,6 +14,8 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 from typing import Optional, Dict, Any, Callable
 from abc import ABC, abstractmethod
 import functools
+
+import torch
 import wandb
 
 import pytorch_lightning as pl
@@ -91,14 +93,14 @@ class VisionModule(pl.LightningModule, ABC):
         Pre-process batch before feeding to self.loss and computing metrics.
 
         :param batch: Output of self.train_ds.__getitem__()
-        :return: Dictionary (or any key-valued container) with at least the keys `samples` and `targets`.
+        :return: Dictionary (or any key-valued container) with at least the keys `samples` and `target`.
         """
 
     def training_step(self, batch, batch_idx, optimizer_idx=0):
         loss = self.loss[optimizer_idx] if hasattr(self.loss, '__getitem__') else self.loss
         loss, logs, pbatch = loss(self.batch_preprocess(batch), batch_idx)
         if self.train_metrics is not None:
-            metric_result = self.train_metrics(pbatch['preds'], pbatch['targets'])
+            metric_result = self.train_metrics(pbatch['preds'], pbatch['target'])
             logs = {**logs, **metric_result}
         self.log_dict(logs, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
         return {'loss': loss, **logs, **pbatch}
@@ -151,19 +153,22 @@ class VisionModule(pl.LightningModule, ABC):
             for attr, partial_ckpt in self.checkpoints.items():
                 partial_ckpt.load_attribute(self, attr)
 
+    @torch.no_grad()
     def _prepare_metrics(self, mode):
         if getattr(self, f'{mode}_metrics') is None: return
-        for metric in getattr(self, f'{mode}_metrics').values():
+        for metric_name, metric in getattr(self, f'{mode}_metrics').items():
             if hasattr(metric, 'prepare_metric'):
                 metric.prepare_metric(self)
-                self.print(f'{mode}_{metric} preparation done')
+                self.print(f'{mode}_{metric_name} preparation done')
 
+    @torch.no_grad()
     def _update_metrics(self, batch, batch_idx, mode):
         if getattr(self, f'{mode}_metrics') is None: return
         pbatch = self.batch_preprocess(batch)
         kwargs = pbatch['kwargs'] if 'kwargs' in pbatch else {}
         pbatch['preds'] = self(pbatch['samples'], **kwargs)
-        getattr(self, f'{mode}_metrics').update(pbatch['preds'], pbatch['targets'])
+        if hasattr(self, 'sample'): pbatch['generated'] = self.sample(pbatch['samples'].size(0), **kwargs)
+        getattr(self, f'{mode}_metrics').update(**pbatch)
         return pbatch
 
     def _compute_and_log_metric(self, mode):

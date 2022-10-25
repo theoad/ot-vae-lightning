@@ -1,0 +1,51 @@
+program: model/discrete_auto_diffuser.py
+name: TRY_DAD_CIFAR10
+description: hyperparameter search for discrete auto diffusion on CIFAR10
+method: random
+project: ot-vae-lightning
+entity: gip
+metric:
+  goal: minimize
+  name: val/metrics/fid
+early_terminate:
+  type: hyperband
+  s: 2
+  eta: 3
+  max_iter: 27
+parameters:
+  trainer.max_epochs:
+    value: 5
+  model.learning_rate:
+    values: [1e-5, 1e-4, 1e-3]
+  model.ce_coeff:
+    values: [1e-3, 1e-2, 1e-1]
+  model.encoder.dim:
+    values: [64, 128, 256]
+  model.encoder.depth:
+    values: [2, 4, 8]
+  model.decoder.depth:
+    values: [2, 4, 8]
+  model.autoregressive_decoder.depth:
+    values: [2, 4, 8]
+  model.vocabulary.num_embeddings:
+    values: [512, 2048, 8192]
+  model.vocabulary.similarity_metric:
+    values: [l2, cosine]
+  model.vocabulary.loss_coeff:
+    values: [1e-3, 1, 10]
+  model.vocabulary.mode:
+    values: [ mean, sample, argmax ]
+  model.vocabulary.loss:
+    values: [ none, first_kl, l2 ]
+  model.vocabulary.temperature:
+    values: [ 1e-3, 1 ]
+  data.train_batch_size:
+    values: [32, 128, 512]
+command:
+  - ${env}
+  - python3
+  - ${program}
+  - "fit"
+  - "--config"
+  - "configs/dad/defaults.yaml"
+  - ${args}

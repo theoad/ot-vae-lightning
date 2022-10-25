@@ -3,7 +3,7 @@ trainer:
   enable_checkpointing: true
   accelerator: auto
   devices: auto
-  max_epochs: 100
+  max_epochs: 10
 #  gradient_clip_val: 1.0
   sync_batchnorm: false
   precision: 32
@@ -21,74 +21,73 @@ trainer:
       name: defaults
 model:
   expansion: 1
-  learning_rate: 1e-3
-  lr_sched_metric: psnr
+  learning_rate: 2e-4
+  lr_sched_metric: fid
   conditional: false
   checkpoints: null
+  ce_coeff: 1e-3
   metrics:
     class_path: torchmetrics.MetricCollection
     init_args:
       metrics:
         psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
+        fid: ot_vae_lightning.metrics.fid.FrechetInceptionDistance
   encoder:
     class_path: ot_vae_lightning.networks.ViT
     init_args:
-      image_size: 32
-      patch_size: 8
       dim: 128
-      depth: 3
-      heads: 4
+      depth: 4
+      heads: 8
       mlp_dim: 512
       channels: 3
-      dim_head: 32
-      dropout: 0.1
-      emb_dropout: 0.
       n_embed_tokens: 0
-      n_input_tokens: null
       output_tokens: input
-      patch_to_embed: true
-      embed_to_patch: false
-      num_classes: null
   decoder:
     class_path: ot_vae_lightning.networks.ViT
     init_args:
-      image_size: 32
-      patch_size: 8
-      dim: 128
-      depth: 3
-      heads: 4
-      mlp_dim: 512
-      dim_head: 32
+      depth: 4
+      heads: 8
       channels: 3
-      dropout: 0.1
-      emb_dropout: 0
       n_embed_tokens: 0
-      n_input_tokens: null
+      n_input_tokens: null    # linked to model.encoder.total_num_tokens (CLI)
       output_tokens: input
       patch_to_embed: false
       embed_to_patch: true
-      num_classes: null
+  autoregressive_decoder:
+    class_path: ot_vae_lightning.networks.vit.AutoRegressive
+    init_args:
+      vocab_size: null        # linked to model.vocabulary.num_embeddings (CLI)
+      depth: 4
+      heads: 8
+      channels: 3
+      n_embed_tokens: 0
+      n_input_tokens: null    # linked to model.encoder.total_num_tokens (CLI)
+      output_tokens: input
+      patch_to_embed: false
+      embed_to_patch: false
+      causal_mask: true
   prior_kwargs:
-    topk: null
-    mode: smooth  # 'smooth', 'sample'
-    loss: l2  # 'kl', 'l2'
-    commitment_cost: 0.25
-  prior:
+    permute: false
+  vocabulary:
     class_path: ot_vae_lightning.prior.codebook.CodebookPrior
     init_args:
       num_embeddings: 8192
-      latent_size: [16, 128]
-      embed_dims: [1]
+      latent_size: null       # linked to model.encoder.out_size (CLI)
+      embed_dims: [2]         # token dim
       similarity_metric: l2
       separate_key_values: false
-      loss_coeff: 0.1
+      topk: null
+      mode: mean                # 'mean', 'sample', 'argmax'
+      loss: null                # 'kl', 'first_kl', 'l2'
+      temperature: 1e-2
+      loss_coeff: 1
       annealing_steps: 0
 data:
   class_path: ot_vae_lightning.data.CIFAR10
   init_args:
     train_val_split: 0.9
     seed: 42
-    train_batch_size: 100
-    val_batch_size: 512
-    test_batch_size: 512
+    train_batch_size: 128
+    val_batch_size: 128
+    test_batch_size: 128
     num_workers: 8

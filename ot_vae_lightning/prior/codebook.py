@@ -22,6 +22,10 @@ class CodebookPrior(Prior):
                  embed_dims: _size = (1, 2, 3),
                  similarity_metric: str = 'cosine',
                  separate_key_values: bool = False,
+                 temperature: float = 1.,
+                 topk: Optional[int] = None,
+                 mode: str = 'mean',  # 'mean', 'sample', 'argmax'
+                 loss: Optional[str] = None,  # 'kl', 'first_kl', 'l2'
                  loss_coeff: float = 1.,
                  annealing_steps: int = 0,
                  ):
@@ -52,6 +56,11 @@ class CodebookPrior(Prior):
         self.latent_size = latent_size
         self.embed_dims = embed_dims
         self.embedding_dim = list(accumulate([latent_size[i - 1] for i in self.embed_dims], mul))[-1]
+        self.temperature = temperature
+        self.topk = topk
+        self.mode = mode
+        self.loss = loss if loss != 'none' else None
+        self.commitment_cost = 0. if self.mode == 'mean' else 0.1
 
         self.values = nn.Embedding(self.num_embeddings, self.embedding_dim)
         self.keys = deepcopy(self.values.weight) if separate_key_values else self.values.weight
@@ -89,11 +98,6 @@ class CodebookPrior(Prior):
     def encode(
             self,
             x: Tensor,
-            temperature: float = 1.,
-            topk: Optional[int] = None,
-            mode: str = 'smooth',  # 'mean', 'sample', 'argmax'
-            loss: Optional[str] = None,  # 'kl', 'first_kl', 'l2'
-            commitment_cost: float = 0,
             permute: bool = True,
             return_distributions: bool = False,
             return_indices: bool = False
@@ -101,29 +105,29 @@ class CodebookPrior(Prior):
         orig_shape = x.shape
         if permute: x = utils.permute_and_flatten(x, self.embed_dims)  # [batch, n_encodings, embedding_dim]
 
-        weights = self.weights(x, temperature, topk)    # [batch, n_encodings, num_embeddings]
+        weights = self.weights(x, self.temperature, self.topk)    # [batch, n_encodings, num_embeddings]
         dist = Categorical(weights)
         indices = dist.sample()
 
-        if mode == 'mean': pass
-        elif mode == 'sample': weights = F.one_hot(indices, self.num_embeddings).type(weights.dtype)
-        elif mode == 'argmax': weights = F.one_hot(weights.argmax(-1), self.num_embeddings).type(weights.dtype)
-        else: raise NotImplementedError(f"mode must be 'sample', 'mean' or 'argmax'. Given: {mode}")
+        if self.mode == 'mean': pass
+        elif self.mode == 'sample': weights = F.one_hot(indices, self.num_embeddings).type(weights.dtype)
+        elif self.mode == 'argmax': weights = F.one_hot(weights.argmax(-1), self.num_embeddings).type(weights.dtype)
+        else: raise NotImplementedError(f"mode must be 'sample', 'mean' or 'argmax'. Given: {self.mode}")
 
         encodings = weights @ self.values.weight  # [batch, n_encodings, embedding_dim]
 
         # Loss
-        if loss is None: prior_loss = torch.zeros(x.size(0), device=x.device).type_as(x)
-        elif loss.lower() == 'l2': prior_loss = F.mse_loss(x, encodings.detach(), reduction='none').mean(-1).sum(-1)
-        elif loss.lower() == 'kl': prior_loss = (log(self.num_embeddings)-dist.entropy()).sum(dim=-1)
-        elif loss.lower() == 'first_kl': prior_loss = (log(self.num_embeddings)-dist.entropy())[..., 0]
-        else: raise NotImplementedError(f"loss must be 'l2', 'kl' or 'first_kl'. Given: {loss}")
+        if self.loss is None: prior_loss = torch.zeros(x.size(0), device=x.device).type_as(x)
+        elif self.loss.lower() == 'l2': prior_loss = F.mse_loss(x, encodings.detach(), reduction='none').mean(-1).sum(-1)
+        elif self.loss.lower() == 'kl': prior_loss = (log(self.num_embeddings)-dist.entropy()).sum(dim=-1)
+        elif self.loss.lower() == 'first_kl': prior_loss = (log(self.num_embeddings)-dist.entropy())[..., 0]
+        else: raise NotImplementedError(f"loss must be 'l2', 'kl' or 'first_kl'. Given: {self.loss}")
 
-        if commitment_cost > 0:
+        if self.commitment_cost > 0:
             embedding_loss = F.mse_loss(encodings, x.detach(), reduction='none').mean(-1).sum(-1)
-            prior_loss = prior_loss + commitment_cost * embedding_loss
+            prior_loss = prior_loss + self.commitment_cost * embedding_loss
 
-        if mode == 'sample': encodings = x + (encodings - x).detach()   # straight-through estimator
+        if self.mode == 'sample': encodings = x + (encodings - x).detach()   # straight-through estimator
         if permute: encodings = utils.unflatten_and_unpermute(encodings, orig_shape, self.embed_dims)
 
         if not return_distributions and not return_indices: return encodings, prior_loss

@@ -6,6 +6,7 @@ from ot_vae_lightning.data.progressive_callback import ProgressiveTransform, PgT
 
 
 class MNIST(TorchvisionDatamodule):
+    IMG_SIZE = (28, 28)
     _mean, _std = (0.1307,), (0.3081,)
     _normalize = T.Normalize(_mean, _std)
     _denormalize = UnNormalize(_mean, _std)
@@ -23,6 +24,7 @@ class MNIST(TorchvisionDatamodule):
 
 
 class MNIST32(TorchvisionDatamodule):
+    IMG_SIZE = (32, 32)
     _mean, _std = (0.1307,), (0.3081,)
     _normalize = T.Normalize(_mean, _std)
     _denormalize = UnNormalize(_mean, _std)
@@ -40,6 +42,7 @@ class MNIST32(TorchvisionDatamodule):
 
 
 class CIFAR10(TorchvisionDatamodule):
+    IMG_SIZE = (32, 32)
     _mean, _std = (0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)
     _normalize = T.Normalize(_mean, _std)
     _denormalize = UnNormalize(_mean, _std)
@@ -68,6 +71,7 @@ class ImageNet(TorchvisionDatamodule):
 
 
 class ImageNet256(TorchvisionDatamodule):
+    IMG_SIZE = (256, 256)
     _mean, _std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
     _normalize = T.Normalize(_mean, _std)
     _denormalize = UnNormalize(_mean, _std)
@@ -88,6 +92,7 @@ class ImageNet256(TorchvisionDatamodule):
 
 
 class ImageNet224(TorchvisionDatamodule):
+    IMG_SIZE = (224, 224)
     _mean, _std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
     _normalize = T.Normalize(_mean, _std)
     _denormalize = UnNormalize(_mean, _std)
@@ -108,6 +113,8 @@ class ImageNet224(TorchvisionDatamodule):
 
 
 class FFHQ128(TorchvisionDatamodule):
+    IMG_SIZE = (128, 128)
+
     def __init__(self, *args, **kwargs):
         super().__init__(
             *args, **kwargs,

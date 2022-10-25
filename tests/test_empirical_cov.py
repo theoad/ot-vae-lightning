@@ -5,6 +5,7 @@ from ot_vae_lightning.ot.w2_utils import w2_gaussian
 from torch.distributions import MultivariateNormal
 from ot_vae_lightning.utils import human_format
 from torch.linalg import vector_norm as norm
+from ot_vae_lightning.ot import compute_mean_cov
 
 
 def empirical_cov_computation(dim, n_samples, batch_size=100):
@@ -40,9 +41,7 @@ def empirical_cov_computation(dim, n_samples, batch_size=100):
             empirical_cov += z_batch.T @ z_batch
             n_obs += z_batch.size(0)
 
-        empirical_mean /= n_obs
-        empirical_cov /= n_obs
-        empirical_cov -= empirical_mean.unsqueeze(-1) @ empirical_mean.unsqueeze(0)
+        empirical_mean, empirical_cov = compute_mean_cov(empirical_mean, empirical_cov, n_obs)
         mean_approx_err = norm(mean - empirical_mean) / norm(mean)
         cov_error = norm(cov.flatten() - empirical_cov.flatten()) / norm(cov.flatten())
         w2 = w2_gaussian(mean, empirical_mean, cov, empirical_cov)

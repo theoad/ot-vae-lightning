@@ -69,11 +69,11 @@ class ViT(nn.Module):
     def __init__(
             self,
             image_size: Union[int, Tuple[int, int]],
-            patch_size: Union[int, Tuple[int, int]],
             dim: int,
+            patch_size: Optional[Union[int, Tuple[int, int]]] = None,
             depth: int = 6,
             heads: int = 8,
-            mlp_dim: int = 2048,
+            mlp_dim: Optional[int] = None,
             channels: int = 3,
             dropout: float = 0.1,
             emb_dropout: float = 0.,
@@ -106,8 +106,16 @@ class ViT(nn.Module):
         :param embed_to_patch: If ``True``, maps the output tokens to the patch space via a linear layer.
         """
         super().__init__()
+        self.dim = dim
         self.causal_mask = causal_mask
+
         image_height, image_width = pair(image_size)
+
+        mlp_dim = mlp_dim or dim * 4
+
+        if patch_size is None:
+            patch_size = min(image_height//4, 16), min(image_width//4, 16)
+
         patch_height, patch_width = pair(patch_size)
 
         if image_height % patch_height or image_width % patch_width:
@@ -117,8 +125,8 @@ class ViT(nn.Module):
         self.num_patches, self.patch_dim = n_patch_h * n_patch_w, channels * patch_height * patch_width
 
         self.n_tokens = {
-            'input': n_input_tokens or self.num_patches,
-            'embed': n_embed_tokens or self.num_patches,
+            'input': self.num_patches if n_input_tokens is None else n_input_tokens,
+            'embed': self.num_patches if n_embed_tokens is None else n_embed_tokens,
             'class': int(num_classes is not None),
             'time': int(time_dependant)
         }
@@ -219,3 +227,16 @@ class ViT(nn.Module):
         if not isinstance(self.embed_to_patch, nn.Identity): x = x[:, -self.num_patches:]
         x = self.embed_to_patch(x)
         return x
+
+
+class AutoRegressive(ViT):
+    def __init__(self, vocab_size: int, **vit_kwargs):
+        super().__init__(**vit_kwargs)
+        self.vocab_embed = nn.Embedding(vocab_size, self.dim)
+        self.head = nn.Linear(self.dim, vocab_size)
+
+    def forward(self, x: Tensor, labels: Optional[Tensor] = None, time: Optional[Tensor] = None) -> Tensor:
+        embeds = self.vocab_embed(x)
+        hs = super().forward(embeds, labels, time)
+        logits = self.head(hs)
+        return logits

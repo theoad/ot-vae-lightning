@@ -57,6 +57,7 @@ def test_dad(prog_bar=False, batch_size=32):
         embed_to_patch=False,
         **vit_tiny_cfg
     )
+
     decoder = ViT(
         n_embed_tokens=None,
         n_input_tokens=encoder.total_num_tokens,
@@ -82,6 +83,9 @@ def test_dad(prog_bar=False, batch_size=32):
         embed_dims=(2,),
         similarity_metric='l2',
         separate_key_values=False,
+        mode='sample',
+        loss='l2',
+        temperature=1e-3,
         loss_coeff=1
     )
 
@@ -90,11 +94,7 @@ def test_dad(prog_bar=False, batch_size=32):
     autoregressive = torch.nn.Sequential(vocab_embed, autoregressive, decoder_head)
 
     vocab_config = dict(
-        mode='sample',
-        loss='l2',
-        commitment_cost=0.25,
-        permute=False,
-        temperature=1e-3,
+        permute=False
     )
 
     model = DAD(  # LightningModule

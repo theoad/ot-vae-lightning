@@ -24,16 +24,22 @@ from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import GaussianPrior
 from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import CNN, AutoEncoder
+from ot_vae_lightning.metrics import FrechetInceptionDistance
 
 _PSNR_PERFORMANCE = 14
-_MAX_EPOCH = 2
+_MAX_EPOCH = 1
 
 
 def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
     seed_everything(42)
 
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
-    datamodule = MNIST32(train_batch_size=batch_size)
+    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar,
+                      accelerator='auto', devices='auto', num_sanity_val_steps=0)
+    datamodule = MNIST32(
+        train_batch_size=batch_size,
+        val_batch_size=batch_size,
+        test_batch_size=batch_size
+    )
 
     in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
@@ -58,8 +64,13 @@ def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
         residual=True
     )
 
+    metrics = MetricCollection({
+        'psnr': PeakSignalNoiseRatio(),
+        'fid': FrechetInceptionDistance(),
+    })
+
     model = VAE(  # LightningModule
-        metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
+        metrics=metrics,
         encoder=encoder,
         decoder=decoder,
         prior=GaussianPrior(loss_coeff=0.1),
@@ -84,8 +95,13 @@ def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
 def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
     seed_everything(42)
 
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
-    datamodule = MNIST32(train_batch_size=batch_size)
+    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar,
+                      accelerator='auto', devices='auto', num_sanity_val_steps=0)
+    datamodule = MNIST32(
+        train_batch_size=batch_size,
+        val_batch_size=batch_size,
+        test_batch_size=batch_size
+    )
 
     in_channels, in_resolution = 1, 32  # MNIST32 pads MNIST images such that the resolution is a power of 2
     latent_channels, latent_resolution = 128, 1  # latent vectors will have shape [128, 1, 1]
@@ -120,6 +136,7 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
     vae = VAE.load_from_checkpoint("vanilla_vae_autoencoder.ckpt")
     vae.freeze()
 
+    vae.test_metrics = MetricCollection({'psnr': PeakSignalNoiseRatio()}, prefix='test/metrics/')
     results = trainer.test(vae, datamodule)
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
@@ -170,7 +187,8 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
 
 
 def inference(ckpt_path, prog_bar=False, batch_size=50):
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar, accelerator='auto', devices='auto')
+    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar,
+                      accelerator='auto', devices='auto', num_sanity_val_steps=0)
 
     # Inference
     vae = VAE.load_from_checkpoint(ckpt_path)
@@ -209,6 +227,10 @@ def inference(ckpt_path, prog_bar=False, batch_size=50):
         psnr.update(vae(x), x)
     assert psnr.compute() > _PSNR_PERFORMANCE
 
+    vae.test_metrics = MetricCollection({
+        'psnr': PeakSignalNoiseRatio(),
+        'fid': FrechetInceptionDistance(),
+    }, prefix='test/metrics/')
     results = trainer.test(vae, dl)
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 

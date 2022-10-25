@@ -93,13 +93,13 @@ class VAE(VisionModule):
         :param learning_rate: The model learning rate. Default `1e-3`
         :param checkpoints: See father class (ot_vae_lightning.model.base.BaseModule) docstring
         """
-        super().__init__(metrics, checkpoints, True, inference_preprocess, inference_postprocess)
+        super().__init__(metrics, checkpoints, False, inference_preprocess, inference_postprocess)
         if autoencoder is None and (encoder is None or decoder is None):
             raise ValueError("At least one of `autoencoder` or (`encoder`, `decoder`) parameters must be set")
         if autoencoder is not None and (encoder is not None or decoder is not None):
             raise ValueError("Setting both `autoencoder` and `encoder` or `decoder` is ambiguous")
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['metrics'])
 
         self.loss = self.nelbo
         self.prior = prior
@@ -134,7 +134,7 @@ class VAE(VisionModule):
         kwargs = {'labels': labels} if self.hparams.conditional else {}
         return {
             'samples': samples,
-            'targets': samples,
+            'target': samples,
             'kwargs': kwargs
         }
 
@@ -157,10 +157,10 @@ class VAE(VisionModule):
         )
         return {"optimizer": opt, "lr_scheduler": {"scheduler": scheduler, "monitor": name}}
 
-    def recon_loss(self, reconstructions: Tensor, targets: Tensor, **kwargs) -> Tensor:
+    def recon_loss(self, reconstructions: Tensor, target: Tensor, **kwargs) -> Tensor:
         recon_loss = (
-            F.mse_loss(reconstructions, targets) if not hasattr(self.prior, 'empirical_kl') or self.prior.empirical_kl else
-            F.mse_loss(reconstructions, targets, reduction="none").sum(dim=(1, 2, 3)).mean()
+            F.mse_loss(reconstructions, target) if not hasattr(self.prior, 'empirical_kl') or self.prior.empirical_kl else
+            F.mse_loss(reconstructions, target, reduction="none").sum(dim=(1, 2, 3)).mean()
         )
         return recon_loss
 
@@ -169,7 +169,7 @@ class VAE(VisionModule):
 
     # noinspection PyUnusedLocal
     def nelbo(self, batch: Batch, batch_idx: int) -> Tuple[Tensor, Dict[str, Tensor], Batch]:
-        samples, targets, kwargs = batch['samples'], batch['targets'], batch['kwargs']
+        samples, target, kwargs = batch['samples'], batch['target'], batch['kwargs']
         batch_size = samples.size(0)
 
         latents, prior_loss = self.encode(samples, expand=True, return_prior_loss=True, **kwargs)
@@ -177,7 +177,7 @@ class VAE(VisionModule):
         reconstructions_mean = self._reduce_mean(reconstructions)
 
         prior_loss = self.prior_loss(prior_loss, **kwargs)
-        recon_loss = self.recon_loss(reconstructions_mean, targets, **kwargs)
+        recon_loss = self.recon_loss(reconstructions_mean, target, **kwargs)
 
         loss = recon_loss + prior_loss
         logs = {
@@ -236,13 +236,13 @@ class VAE(VisionModule):
 
     @Collage.log_method
     def reconstruction(self, batch: Batch) -> List[Tensor]:
-        samples, targets, kwargs = batch['samples'], batch['targets'], batch['kwargs'],
+        samples, target, kwargs = batch['samples'], batch['target'], batch['kwargs'],
         batch_size = samples.size(0)
         reconstructions = self(samples, expand=True, **kwargs)
         reconstructions_mean = self._reduce_mean(reconstructions)
         reconstructions_std = self._reduce_std(reconstructions)
         realizations = [reconstructions[batch_size * i:batch_size * (i + 1)] for i in range(self.hparams.expansion)]
-        return [targets, reconstructions_mean, *realizations, reconstructions_std]
+        return [target, reconstructions_mean, *realizations, reconstructions_std]
 
     @Collage.log_method
     def generation(self, batch: Batch) -> List[Tensor]:
@@ -272,6 +272,9 @@ class VaeCLI(VisionCLI):
         super().add_arguments_to_parser(parser)
         parser.add_lightning_class_args(Collage, "collage")
         parser.set_defaults({"collage.log_interval": 100, "collage.num_samples": 8})
+        parser.link_arguments("data.IMG_SIZE", "model.encoder.init_args.image_size", apply_on="instantiate")
+        parser.link_arguments("data.IMG_SIZE", "model.decoder.init_args.image_size", apply_on="instantiate")
+        parser.link_arguments("model.encoder.init_args.dim", "model.decoder.init_args.dim", apply_on="instantiate")
 
 
 if __name__ == '__main__':
@@ -294,12 +297,12 @@ if __name__ == '__main__':
         pg_star=0,
     )
 
-    ProgressiveGaussianBlur = PgTransform(
-        GaussianBlur, {'sigma': list(zip(np.linspace(10, 0, 50), np.linspace(10, 0, 50)))[:-1]}, kernel_size=3
-    )
+    # ProgressiveGaussianBlur = PgTransform(
+    #     GaussianBlur, {'sigma': list(zip(np.linspace(10, 0, 50), np.linspace(10, 0, 50)))[:-1]}, kernel_size=3
+    # )
 
     callbacks = [
-        ProgressiveTransform(ProgressiveGaussianBlur, list(range(50))),
+        # ProgressiveTransform(ProgressiveGaussianBlur, list(range(50))),
         LatentTransport(
             transport_dims=(1,),
             diag=False,
