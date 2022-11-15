@@ -22,6 +22,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers.wandb import WandbLogger
 from pytorch_lightning.cli import LightningCLI
 from torchmetrics import MetricCollection
+from torch_ema import ExponentialMovingAverage
 from ot_vae_lightning.utils.partial_checkpoint import PartialCheckpoint
 
 
@@ -42,6 +43,7 @@ class VisionModule(pl.LightningModule, ABC):
             metric_on_train: bool = False,
             inference_preprocess: Optional[Callable] = None,
             inference_postprocess: Optional[Callable] = None,
+            ema_decay: Optional[float] = None,
     ):
         """
         ----------------------------------------------------------------------------------------------------------------
@@ -78,6 +80,7 @@ class VisionModule(pl.LightningModule, ABC):
         self.inference_preprocess = inference_preprocess
         self.inference_postprocess = inference_postprocess
         self._inference_flag = False
+        self._ema = None
 
     @abstractmethod
     def forward(self, *args, **kwargs) -> Any:
@@ -95,6 +98,9 @@ class VisionModule(pl.LightningModule, ABC):
         :param batch: Output of self.train_ds.__getitem__()
         :return: Dictionary (or any key-valued container) with at least the keys `samples` and `target`.
         """
+
+    def optim_parameters(self):
+        return (p for p in self.parameters() if p.requires_grad)
 
     def training_step(self, batch, batch_idx, optimizer_idx=0):
         loss = self.loss[optimizer_idx] if hasattr(self.loss, '__getitem__') else self.loss
@@ -129,15 +135,29 @@ class VisionModule(pl.LightningModule, ABC):
 
     def on_validation_epoch_start(self) -> None:
         self.inference = True
+        if self._ema is not None: self._ema.store(); self._ema.copy_to()
 
     def on_test_epoch_start(self) -> None:
         self.inference = True
+        if self._ema is not None: self._ema.store(); self._ema.copy_to()
 
     def on_predict_epoch_start(self) -> None:
         self.inference = True
+        if self._ema is not None: self._ema.store(); self._ema.copy_to()
+
+    def on_validation_epoch_end(self) -> None:
+        if self._ema is not None: self._ema.restore()
+
+    def on_test_epoch_end(self) -> None:
+        if self._ema is not None: self._ema.restore()
+
+    def on_predict_epoch_end(self, results) -> None:
+        if self._ema is not None: self._ema.restore()
 
     def on_fit_start(self) -> None:
         self._set_inference_transforms()
+        if self.hparams.ema_decay is not None:
+            self._ema = ExponentialMovingAverage(self.optim_parameters(), decay=self.hparams.ema_decay)
         return self._prepare_metrics('train')
 
     def on_validation_start(self) -> None:
@@ -147,6 +167,10 @@ class VisionModule(pl.LightningModule, ABC):
     def on_test_start(self) -> None:
         self._set_inference_transforms()
         return self._prepare_metrics('test')
+
+    def on_before_zero_grad(self, optimizer) -> None:
+        if self._ema is not None:
+            self._ema.update(self.optim_parameters())
 
     def setup(self, stage=None):
         if self.checkpoints is not None:

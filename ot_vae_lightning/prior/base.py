@@ -59,7 +59,8 @@ class Prior(nn.Module, ABC):
 
     @staticmethod
     def empirical_reverse_kl(p: Distribution, q: Distribution, z: Optional[Tensor] = None) -> Tensor:
-        return q.log_prob(z) - p.log_prob(z)
+        reduce_dim = list(range(1, len(z.shape)))
+        return (q.log_prob(z) - p.log_prob(z)).sum(reduce_dim)
 
     @property
     def loss_coeff(self):

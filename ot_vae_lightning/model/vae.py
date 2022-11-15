@@ -14,6 +14,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 import warnings
 import inspect
 import functools
+import itertools
 from typing import Tuple, Optional, Dict, List, Union, Callable, Any
 import numpy as np
 
@@ -63,8 +64,9 @@ class VAE(VisionModule):
             checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
             inference_preprocess: Optional[Callable] = None,
             inference_postprocess: Optional[Callable] = None,
+            ema_decay: Optional[float] = None,
             learning_rate: float = 1e-3,
-            lr_sched_metric: Optional[str] = None,
+            lr_sched_metric: Optional[str] = None,  # If `None`, CosineLr is used
             conditional: bool = False,
             expansion: int = 1,
             prior_kwargs: Dict[str, Any] = {},
@@ -93,7 +95,7 @@ class VAE(VisionModule):
         :param learning_rate: The model learning rate. Default `1e-3`
         :param checkpoints: See father class (ot_vae_lightning.model.base.BaseModule) docstring
         """
-        super().__init__(metrics, checkpoints, False, inference_preprocess, inference_postprocess)
+        super().__init__(metrics, checkpoints, False, inference_preprocess, inference_postprocess, ema_decay)
         if autoencoder is None and (encoder is None or decoder is None):
             raise ValueError("At least one of `autoencoder` or (`encoder`, `decoder`) parameters must be set")
         if autoencoder is not None and (encoder is not None or decoder is not None):
@@ -104,7 +106,6 @@ class VAE(VisionModule):
         self.loss = self.nelbo
         self.prior = prior
         self._warn_call('prior.forward'); self._warn_call('prior.sample')
-
         if autoencoder is not None:
             assert (
                     isinstance(autoencoder, nn.Module) and
@@ -145,24 +146,31 @@ class VAE(VisionModule):
         reconstructions = self.decode(latents, expand_kwargs=expand, no_postprocess_override=True, **kwargs)
         return reconstructions
 
-    def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-        if self.hparams.lr_sched_metric is None: return opt
+    def optim_parameters(self):
+        if hasattr(self, 'autoencoder'):
+            return (p for p in itertools.chain(self.autoencoder.parameters(), self.prior.parameters()) if p.requires_grad)
+        return (p for p in itertools.chain(self.encoder.parameters(), self.decoder.parameters(), self.prior.parameters()) if p.requires_grad)
 
-        name = self.val_metrics.prefix + self.hparams.lr_sched_metric
-        mode = 'max' if self.val_metrics[self.hparams.lr_sched_metric].higher_is_better else 'min'
-        # scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, 0.95)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            opt, mode=mode, factor=0.5, patience=5, verbose=True, threshold=1e-1, min_lr=1e-8
+    def configure_optimizers(self):
+        opt = torch.optim.AdamW(
+            self.optim_parameters(), lr=self.hparams.learning_rate, weight_decay=1e-4, betas=(0.9, 0.999)
         )
-        return {"optimizer": opt, "lr_scheduler": {"scheduler": scheduler, "monitor": name}}
+        if self.hparams.lr_sched_metric is None:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=self.trainer.estimated_stepping_batches, eta_min=1e-6, last_epoch=self.trainer.global_step or -1
+            )
+            lr_scheduler = {"scheduler": scheduler, "interval": "step"}
+        else:
+            name = self.val_metrics.prefix + self.hparams.lr_sched_metric
+            mode = 'max' if self.val_metrics[self.hparams.lr_sched_metric].higher_is_better else 'min'
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                opt, mode=mode, factor=0.75, patience=8, verbose=True, threshold=1e-1, min_lr=1e-6
+            )
+            lr_scheduler = {"scheduler": scheduler, "monitor": name}
+        return {"optimizer": opt, "lr_scheduler": lr_scheduler}
 
     def recon_loss(self, reconstructions: Tensor, target: Tensor, **kwargs) -> Tensor:
-        recon_loss = (
-            F.mse_loss(reconstructions, target) if not hasattr(self.prior, 'empirical_kl') or self.prior.empirical_kl else
-            F.mse_loss(reconstructions, target, reduction="none").sum(dim=(1, 2, 3)).mean()
-        )
-        return recon_loss
+        return F.mse_loss(reconstructions, target, reduction="none").sum(dim=(1, 2, 3)).mean()
 
     def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
         return prior_loss.mean()
@@ -176,8 +184,8 @@ class VAE(VisionModule):
         reconstructions = self.decode(latents, expand_kwargs=True, **kwargs)
         reconstructions_mean = self._reduce_mean(reconstructions)
 
-        prior_loss = self.prior_loss(prior_loss, **kwargs)
-        recon_loss = self.recon_loss(reconstructions_mean, target, **kwargs)
+        prior_loss = self.prior_loss(prior_loss, **kwargs) / np.prod(samples.shape[1:])
+        recon_loss = self.recon_loss(reconstructions_mean, target, **kwargs) / np.prod(samples.shape[1:])
 
         loss = recon_loss + prior_loss
         logs = {
@@ -256,15 +264,14 @@ class VAE(VisionModule):
         args = inspect.signature(self.filter_kwargs.__init__).parameters['arg_keys'].default
         if isinstance(args, str): args = [args]
         for arg in args:
-            if not utils.hasarg(module, arg):
-                if arg == 'labels':
-                    if self.hparams.conditional:
-                        warnings.warn(f"""
-                        `conditional` is specified but `{method}` doesn't accept `{arg}` parameter
-                        """)
-                else: warnings.warn(f"""
-                `{arg}` specified as a key-worded argument but `{method}` doesn't accept `{arg}` parameter.
+            if utils.hasarg(module, arg): continue
+            if arg == 'labels':
+                if self.hparams.conditional: warnings.warn(f"""
+                `conditional` is specified but `{method}` doesn't accept `{arg}` parameter
                 """)
+            else: warnings.warn(f"""
+            `{arg}` specified as a key-worded argument but `{method}` doesn't accept `{arg}` parameter.
+            """)
 
 
 class VaeCLI(VisionCLI):
@@ -272,9 +279,9 @@ class VaeCLI(VisionCLI):
         super().add_arguments_to_parser(parser)
         parser.add_lightning_class_args(Collage, "collage")
         parser.set_defaults({"collage.log_interval": 100, "collage.num_samples": 8})
-        parser.link_arguments("data.IMG_SIZE", "model.encoder.init_args.image_size", apply_on="instantiate")
-        parser.link_arguments("data.IMG_SIZE", "model.decoder.init_args.image_size", apply_on="instantiate")
-        parser.link_arguments("model.encoder.init_args.dim", "model.decoder.init_args.dim", apply_on="instantiate")
+        # parser.link_arguments("data.IMG_SIZE", "model.encoder.init_args.image_size", apply_on="instantiate")
+        # parser.link_arguments("data.IMG_SIZE", "model.decoder.init_args.image_size", apply_on="instantiate")
+        # parser.link_arguments("model.encoder.init_args.dim", "model.decoder.init_args.dim", apply_on="instantiate")
 
 
 if __name__ == '__main__':

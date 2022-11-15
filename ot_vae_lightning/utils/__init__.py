@@ -116,14 +116,6 @@ def std_replicated_batch(expanded_batch, n):
     return unsqueeze_first_dims(expanded_batch, n).std(0)
 
 
-def ema_inplace(moving_avg, new, decay):
-    moving_avg.data.mul_(decay).add_(new, alpha=(1 - decay))
-
-
-def laplace_smoothing(x, n_categories, eps=1e-5):
-    return (x + eps) / (x.sum() + n_categories * eps)
-
-
 def human_format(num):
     num = float('{:.3g}'.format(num))
     magnitude = 0

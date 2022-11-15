@@ -11,7 +11,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Tuple
+from typing import Tuple, Optional
 import torch
 from torch import Tensor
 from torch.types import _size
@@ -65,12 +65,14 @@ class GaussianPrior(Prior):
                          + p.variance.log() - q.variance.log()
                          + q.variance / p.variance - 1, dim=reduce_dim)
 
-    def reparametrization(self, z: Tensor) -> Distribution:
+    def reparametrization(self, z: Tensor, temperature: Optional[Tensor] = None) -> Distribution:
         if self.fixed_var:
             mu, var = z, torch.ones_like(z)
         else:
             mu, log_var = torch.chunk(z, 2, self.reparam_dim)
             var = (log_var/2).exp()
+        # if temperature is not None:
+        #     var = var * temperature[:, None, None] + 1e-6
         return Normal(mu, var)
 
     def out_size(self, size: _size) -> _size:
@@ -81,8 +83,8 @@ class GaussianPrior(Prior):
         reparam_size[reparam_dim] //= 2   # re-parametrization trick
         return torch.Size(reparam_size)
 
-    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
-        q = self.reparametrization(x)
+    def encode(self, x: Tensor, time: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
+        q = self.reparametrization(x, temperature=time)
         p = self.reparametrization(torch.zeros_like(x))
         z = q.rsample()
         loss = self.empirical_reverse_kl(p, q, z) if self.empirical_kl else self.closed_form_reverse_kl(p, q)
@@ -91,5 +93,5 @@ class GaussianPrior(Prior):
     def sample(self, shape: _size, device: torch.device) -> Tensor:   # noqa arguments-differ
         return torch.randn(*shape, device=device)
 
-    def forward(self, x: Tensor, step: int) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
-        return super().forward(x, step)
+    def forward(self, x: Tensor, step: int, time: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
+        return super().forward(x, step, time=time)

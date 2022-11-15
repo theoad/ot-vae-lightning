@@ -123,7 +123,7 @@ class FrechetInceptionDistance(Metric):
     #     self._compute_real_statistics()
     #     rank_zero_info('FID prepared successfully')
 
-    def update(self, *, generated: Optional[Tensor] = None, samples: Optional[Tensor] = None) -> None:  # type: ignore
+    def update(self, generated: Optional[Tensor] = None, samples: Optional[Tensor] = None) -> None:  # type: ignore
         """ Update the state with extracted features
         Args:
             generated: tensor of ``fake`` images

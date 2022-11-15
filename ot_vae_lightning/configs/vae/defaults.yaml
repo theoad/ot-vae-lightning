@@ -3,10 +3,10 @@ trainer:
   enable_checkpointing: true
   accelerator: auto
   devices: auto
-  max_epochs: 100
-#  gradient_clip_val: 1.0
+  max_steps: 1000000
+  gradient_clip_val: 1.0
   sync_batchnorm: false
-  precision: 32
+  precision: 16
   enable_model_summary: true
   weights_save_path: null
   num_sanity_val_steps: 2
@@ -18,48 +18,51 @@ trainer:
       entity: gip
       dir: vae
       log_model: true
-      name: defaults
+      name: auto_diffusion
 model:
   expansion: 1
-  learning_rate: 1e-3
-  lr_sched_metric: psnr
+  learning_rate: 5e-4
+#  lr_sched_metric: fid
   conditional: false
   checkpoints: null
+#  ema_decay: 0.999
   metrics:
     class_path: torchmetrics.MetricCollection
     init_args:
       metrics:
         psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
+        fid: ot_vae_lightning.metrics.fid.FrechetInceptionDistance
   prior:
     class_path: ot_vae_lightning.prior.GaussianPrior
     init_args:
       loss_coeff: 0.1
       reparam_dim: 1
-      empirical_kl: false
+      empirical_kl: true
       annealing_steps: 0
       fixed_var: false
   autoencoder:
     class_path: ot_vae_lightning.networks.AutoEncoder
     init_args:
       in_features: 3
-      in_resolution: 32
-      latent_features: 256
-      latent_resolution: 1
+      in_resolution: 128
+      latent_features: 512
+      latent_resolution: 4
       double_encoded_features: true
-      capacity: 32
+      capacity: 16
       n_layers: 3
       down_up_sample: 2
-      normalization: batchnorm
+      normalization: group
       activation: relu
-      equalized_lr: false
+      equalized_lr: true
       dropout: 0.
       residual: true
+      time_embed_dim: 128
 data:
-  class_path: ot_vae_lightning.data.CIFAR10
+  class_path: ot_vae_lightning.data.FFHQ128
   init_args:
     train_val_split: 0.9
     seed: 42
-    train_batch_size: 128
-    val_batch_size: 512
-    test_batch_size: 512
-    num_workers: 8
+    train_batch_size: 32
+    val_batch_size: 128
+    test_batch_size: 128
+    num_workers: 10
