@@ -59,10 +59,10 @@ def empirical_cov_computation(dim, n_samples, batch_size=100):
         assert mean_diff < STABILITY_CONST and cov_diff < STABILITY_CONST and w2_diff < sqrt(STABILITY_CONST)
 
 
-def test_empirical_cov_computation(n_samples=(int(1e3), int(1e4))):
+def test_empirical_cov_computation(n_samples=(int(1e4), int(1e5))):
     for dim in [64, 128, 256, 512]:
         empirical_cov_computation(dim, n_samples)
 
 
 if __name__ == "__main__":
-    test_empirical_cov_computation((int(1e3), int(1e4), int(1e5), int(1e6)))
+    test_empirical_cov_computation((int(1e4), int(1e5)))

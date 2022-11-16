@@ -18,12 +18,12 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-20.04
+          - ubuntu-latest
           #- macos-latest
           #- windows-2019
         python-version: [3.8]
 
-    # Timeout: https://ßstackoverflow.com/a/59076067/4521646
+    # Timeout: https://stackoverflow.com/a/59076067/4521646
     timeout-minutes: 35
 
     steps:
@@ -33,11 +33,11 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-    # Github Actions: Run step on specific OS: https://stackoverflow.com/a/57948488/4521646
-    - name: Setup macOS
-      if: runner.os == 'macOS'
-      run: |
-        brew install libomp  # https://github.com/pytorch/pytorch/issues/20030
+#    # Github Actions: Run step on specific OS: https://stackoverflow.com/a/57948488/4521646
+#    - name: Setup macOS
+#      if: runner.os == 'macOS'
+#      run: |
+#        brew install libomp  # https://github.com/pytorch/pytorch/issues/20030
 
     # Note: This uses an internal pip API and may not always work
     # https://github.com/actions/cache/blob/master/examples.md#multiple-oss-in-a-workflow
@@ -65,7 +65,7 @@ jobs:
 
     - name: Tests
       run: |
-        coverage run --source ot_vae_lightning -m py.test ot_vae_lightning tests -v --junitxml=junit/test-results-${{ runner.os }}-${{ matrix.python-version }}.xml
+        coverage run --source ot_vae_lightning -m pytest ot_vae_lightning tests -v --junitxml=junit/test-results-${{ runner.os }}-${{ matrix.python-version }}.xml
 
     - name: Statistics
       if: success()
