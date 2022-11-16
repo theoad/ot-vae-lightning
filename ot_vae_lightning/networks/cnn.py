@@ -34,7 +34,11 @@ class ConvLayer(nn.Conv2d):
     -   residual skip connections
     -   normalization
     -   activation
+    -   up-sampling
+    -   down-sampling
     -   `equalized learning rate <https://arxiv.org/abs/1710.10196>`_
+
+    The conv, norm, act, sample ordering is inspired from  `BigGAN <https://arxiv.org/pdf/1809.11096.pdf>`_
     """
 
     enable_warnings = False
@@ -45,6 +49,8 @@ class ConvLayer(nn.Conv2d):
             out_features: int,
 
             # ConvLayer params
+            down_sample: Union[bool, int, nn.Module] = False,
+            up_sample: Union[bool, int, nn.Module] = False,
             additional_embed: Optional[int] = None,
             normalization: Optional[str] = None,
             activation: Optional[str] = None,
@@ -62,6 +68,14 @@ class ConvLayer(nn.Conv2d):
         """
         :param in_features: Number of channels in the input image
         :param out_features: Number of channels produced by the convolution
+        :param down_sample: If ``True``, perform 0.5 x bilinear interpolation before applying the ConvLayers.
+                            If integer, perform 1/down_sample x bilinear interpolation before applying the ConvLayers.
+                            If nn.Module simply apply before applying the ConvLayers.
+                            Default ``False``
+        :param up_sample: If ``True``, perform 2 x bilinear interpolation after applying the ConvLayers.
+                          If integer, perform up_sample x bilinear interpolation after applying the ConvLayers.
+                          If nn.Module simply apply after applying the ConvLayers.
+                          Default ``False``
 
         :param bias: If ``True``, adds a learnable bias to the output. Default: ``True``
         :param normalization: Normalization layer. nn.Module expecting parameter ``num_features`` in `__init__`.
@@ -78,16 +92,29 @@ class ConvLayer(nn.Conv2d):
         :param groups:  Number of blocked connections from input channels to output channels. Default: 1
         """
         super().__init__(in_features, out_features, kernel_size, stride, padding, dilation, groups, bias)
+        if isinstance(down_sample, nn.Module): down_sample = down_sample
+        elif isinstance(down_sample, int) and down_sample > 0: down_sample = nn.Upsample(scale_factor=1/down_sample)
+        elif isinstance(down_sample, bool) and down_sample: down_sample = nn.Upsample(scale_factor=0.5)
+        else: down_sample = nn.Identity()
+        self._down_sample = down_sample
+
+        if isinstance(up_sample, nn.Module): up_sample = up_sample
+        elif isinstance(up_sample, int) and up_sample > 0: up_sample = nn.Upsample(scale_factor=up_sample)
+        elif isinstance(up_sample, bool) and up_sample: up_sample = nn.Upsample(scale_factor=2)
+        else: up_sample = nn.Identity()
+        self._up_sample = up_sample
+
         self._dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
         self.conv_scale = 1 / np.sqrt(np.prod(self.weight.shape[1:])) if equalized_lr else 1
-        self._embed_proj = nn.Linear(additional_embed, out_features) if additional_embed is not None else None
-        self.linear_scale = 1 / np.sqrt(out_features) if equalized_lr else 1
+        self._embed_proj_scale = nn.Linear(additional_embed, in_features) if bool(additional_embed) else None
+        self._embed_proj_bias = nn.Linear(additional_embed, in_features) if bool(additional_embed) else None
+        self.linear_scale = 1 / np.sqrt(in_features) if equalized_lr else 1
 
         if normalization is None or "none" in normalization.lower() or "null" in normalization.lower():
             self._normalization = nn.Identity()
-        elif "batch" in normalization.lower(): self._normalization = nn.BatchNorm2d(out_features)
-        elif "group" in normalization.lower(): self._normalization = nn.GroupNorm(div_sqrt(out_features // groups), out_features)
-        elif "instance" in normalization.lower(): self._normalization = nn.InstanceNorm2d(out_features)
+        elif "batch" in normalization.lower(): self._normalization = nn.BatchNorm2d(in_features)
+        elif "group" in normalization.lower(): self._normalization = nn.GroupNorm(div_sqrt(in_features // groups), in_features)
+        elif "instance" in normalization.lower(): self._normalization = nn.InstanceNorm2d(in_features)
         else: raise NotImplementedError(f"normalization={normalization} not supported")
 
         if activation is None or "none" in activation.lower() or "null" in activation.lower():
@@ -111,26 +138,38 @@ class ConvLayer(nn.Conv2d):
 
     def _add_embed(self, x: Tensor, embed: Tensor) -> Tensor:
         if self.enable_warnings:
-            if embed is not None and self._embed_proj is None:
+            if embed is not None and self._embed_proj_scale is None:
                 warnings.warn("""
                 given conditional argument `embed` but `self.embed_proj` is None.
                 To enable embedding-conditioned layer, use `layer = ConvLayer(additional_embed=...).`
                 """)
-            if self._embed_proj is not None and embed is None:
+            if self._embed_proj_scale is not None and embed is None:
                 warnings.warn("""
                 `additional_embed` specified in ConvLayer constructor but `embed` is None.
                 ignoring additional `embed` input.
                 """)
-        if self._embed_proj is not None:
+        if self._embed_proj_scale is not None:
             assert embed is not None, "Flow assertion error. Expected `embed` to not be None"
-            x += F.linear(self._activation(embed), self._embed_proj.weight * self.linear_scale, self._embed_proj.bias)[..., None, None]
+            scale = F.linear(
+                self._activation(embed),
+                self._embed_proj_scale.weight * self.linear_scale,
+                self._embed_proj_scale.bias
+            )[..., None, None]
+            bias = F.linear(
+                self._activation(embed),
+                self._embed_proj_bias.weight * self.linear_scale,
+                self._embed_proj_bias.bias
+            )[..., None, None]
+            x = x * scale + bias
         return x
 
     def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
-        out = self._add_embed(x, embed)
-        out = self._conv_forward(out, self.weight * self.conv_scale, self.bias)
-        out = self._normalization(out)
+        out = self._normalization(x)
+        out = self._add_embed(out, embed)
         out = self._activation(out)
+        out = self._up_sample(out)
+        out = self._conv_forward(out, self.weight * self.conv_scale, self.bias)
+        out = self._down_sample(out)
         out = self._dropout(out)
         return out
 
@@ -141,6 +180,8 @@ class ConvLayer(nn.Conv2d):
 class AttentionBlock(nn.Module):
     """
     An attention block that allows spatial positions to attend to each other.
+
+    Inspired from `lucidrains <https://github.com/lucidrains/denoising-diffusion-pytorch>`_' implementation.
     """
     def __init__(
         self,
@@ -157,10 +198,13 @@ class AttentionBlock(nn.Module):
         if channels % heads != 0:
             raise ValueError(f"q,k,v channels: {channels} is not divisible by heads: {heads}")
         self.qkv = ConvLayer(
-            channels, channels * 3, additional_embed, normalization, None, equalized_lr, 0., 1, 1, 0, 1, groups, False
+            channels, channels * 3, False, False, additional_embed, normalization, None,
+            equalized_lr, 0., 1, 1, 0, 1, groups, False
         )
         self.attention = QKVAttention(heads)
-        self.proj_out = ConvLayer(channels, channels, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False)
+        self.proj_out = ConvLayer(
+            channels, channels, False, False, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False
+        )
 
     def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
         b, c, *spatial = x.shape
@@ -175,7 +219,7 @@ class AttentionBlock(nn.Module):
 
 class ConvBlock(nn.Module):
     """
-    Conv block that wraps a series of `n_layers` ConvLayer with up/down sample.
+    Conv block that wraps a series of `n_layers`.
     """
     def __init__(
             self,
@@ -185,10 +229,10 @@ class ConvBlock(nn.Module):
             # ConvBlock params
             n_attn_heads: int = 0,
             n_layers: int = 2,
-            down_sample: Union[bool, int, nn.Module] = False,
-            up_sample: Union[bool, int, nn.Module] = False,
 
             # ConvLayer params
+            down_sample: Union[bool, int, nn.Module] = False,
+            up_sample: Union[bool, int, nn.Module] = False,
             additional_embed: Optional[int] = None,
             normalization: Optional[str] = "batchnorm",
             activation: Optional[str] = "relu",
@@ -233,30 +277,34 @@ class ConvBlock(nn.Module):
         :param groups:  Number of blocked connections from input channels to output channels. Default: 1
         :param bias: If ``True``, adds a learnable bias to the output. Default: ``True``
         """
-        if isinstance(down_sample, nn.Module): down_sample = down_sample
-        elif isinstance(down_sample, int) and down_sample > 0: down_sample = nn.Upsample(scale_factor=1/down_sample)
-        elif isinstance(down_sample, bool) and down_sample: down_sample = nn.Upsample(scale_factor=0.5)
-        else: down_sample = nn.Identity()
-
-        if isinstance(up_sample, nn.Module): up_sample = up_sample
-        elif isinstance(up_sample, int) and up_sample > 0: up_sample = nn.Upsample(scale_factor=up_sample)
-        elif isinstance(up_sample, bool) and up_sample: up_sample = nn.Upsample(scale_factor=2)
-        else: up_sample = nn.Identity()
-
         super().__init__()
         self.block = FilterSequential(
-            down_sample,
-            ConvLayer(in_features, out_features, additional_embed, normalization, activation, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias),
-            *[ConvLayer(out_features, out_features, additional_embed, normalization, activation, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias)
-              for _ in range((n_layers - 1))],
-            AttentionBlock(out_features, n_attn_heads, additional_embed, normalization, equalized_lr, groups, residual) if n_attn_heads > 0 else nn.Identity(),
-            up_sample
+            # # Attention when down-sampling
+            # AttentionBlock(in_features, n_attn_heads, additional_embed, normalization, equalized_lr, groups, residual)
+            # if n_attn_heads > 0 and bool(down_sample) else nn.Identity(),
+
+            # Up-sampling Conv
+            ConvLayer(in_features, out_features, False, up_sample, additional_embed, normalization, activation,
+                      equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias),
+
+            # Fixed spatial extent Conv
+            *[ConvLayer(out_features, out_features, False, False, additional_embed, normalization, activation,
+                        equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias)
+              for _ in range((n_layers - 2))],
+
+            # Down-sampling Conv
+            ConvLayer(out_features, out_features, down_sample, False, additional_embed, normalization, activation,
+                      equalized_lr, dropout, kernel_size, stride, padding, dilation, groups, bias),
+
+            # Attention when up-sampling
+            AttentionBlock(out_features, n_attn_heads, additional_embed, normalization, equalized_lr, groups, residual)
+            if n_attn_heads > 0 and bool(up_sample) else nn.Identity(),
         )
 
+        # Residual (skip) connection
         self.residual = nn.Sequential(
-            deepcopy(down_sample),
-            ConvLayer(in_features, out_features, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
-            deepcopy(up_sample)
+            ConvLayer(in_features, out_features, down_sample, up_sample, None, None, None,
+                      equalized_lr, 0., 1, 1, 0, 1, groups, False),
         ) if residual else None
 
     def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
@@ -288,13 +336,13 @@ class CNN(nn.Module):
             out_resolution: Optional[int] = None,
             intermediate_features: Optional[List[int]] = None,
             capacity: int = 8,
-            max_attn_res: int = 8,
+            max_attn_res: int = 16,
 
             # ConvBlock params
             n_layers: int = 2,
             residual: bool = False,
-            down_sample: Union[bool, int] = False,
-            up_sample: Union[bool, int] = False,
+            down_sample: Union[nn.Module, bool, int] = False,
+            up_sample: Union[nn.Module, bool, int] = False,
 
             # ConvLayer params
             additional_embed: Optional[int] = None,
@@ -379,11 +427,11 @@ class CNN(nn.Module):
 
         self.out_size = torch.Size([out_features, out_resolution, out_resolution])
         self.blocks = FilterSequential(
-            ConvLayer(features[0], features[0], None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
+            ConvLayer(features[0], features[0], False, False, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
             *[ConvBlock(ic, oc, heads(oc, r), n_layers, down_sample, up_sample, additional_embed, normalization,
                         activation, residual, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups,
                         bias) for ic, oc, r in zip(features[:-1], features[1:], attn_resolutions)],
-            ConvLayer(features[-1], features[-1], None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
+            ConvLayer(features[-1], features[-1], False, False, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
         )
 
     def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
@@ -412,7 +460,7 @@ class AutoEncoder(nn.Module):
             latent_resolution: Optional[int] = None,
             intermediate_features: Optional[List[int]] = None,
             capacity: int = 8,
-            max_attn_res: int = 8,
+            max_attn_res: int = 16,
             num_classes: Optional[int] = None,
             time_embed_dim: Optional[int] = None,
             double_encoded_features: bool = False,  # for re-parametrization trick
@@ -471,9 +519,12 @@ class AutoEncoder(nn.Module):
         """
         super().__init__()
         self.latent_size = torch.Size([latent_features * (1 + int(double_encoded_features)), latent_resolution, latent_resolution])
-        self.class_embed = nn.Embedding(num_classes, latent_features) if num_classes is not None else None
-        self.time_embed = GaussianFourierProjection(time_embed_dim, out_dim=latent_features) if time_embed_dim is not None else None
-        additional_embed = latent_features if self.class_embed is not None and self.time_embed is not None else None
+        self.class_embed = nn.Embedding(num_classes, latent_features) if bool(num_classes) else None
+        self.time_embed = GaussianFourierProjection(time_embed_dim, latent_features) if bool(time_embed_dim) else None
+
+        if bool(self.class_embed) and bool(self.time_embed): additional_embed = 2 * latent_features
+        elif bool(self.class_embed) or bool(self.time_embed): additional_embed = latent_features
+        else: additional_embed = None
 
         self.encoder = CNN(
             in_features, latent_features * (1 + int(double_encoded_features)), in_resolution, latent_resolution,
@@ -513,7 +564,7 @@ class AutoEncoder(nn.Module):
             assert time is not None, "Flow assertion error. Expected `time` to not be None"
             time_embed = self.time_embed(time)
 
-        if class_embed is not None and time_embed is not None: return class_embed + time_embed
+        if class_embed is not None and time_embed is not None: return torch.cat([class_embed, time_embed], dim=1)
         elif class_embed is not None and time_embed is None: return class_embed
         elif class_embed is None and time_embed is not None: return time_embed
         else: return None

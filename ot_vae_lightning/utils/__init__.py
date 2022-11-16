@@ -14,12 +14,18 @@ from ot_vae_lightning.utils.collage import Collage
 
 
 class ToTensor(T.ToTensor):
+    """
+    TODO
+    """
     def __call__(self, pic):
         if isinstance(pic, Tensor): return pic
         return super().__call__(pic)
 
 
 class UnNormalize(nn.Module):
+    """
+    TODO
+    """
     def __init__(
             self,
             mean: Union[Tensor, Sequence[float]],
@@ -77,6 +83,9 @@ class FilterKwargs(contextlib.AbstractContextManager):
 
 
 class debug(contextlib.ContextDecorator):
+    """
+    TODO
+    """
     def __enter__(self):
         rank_zero_info('Entering')
 
@@ -85,38 +94,100 @@ class debug(contextlib.ContextDecorator):
 
 
 def squeeze_first_dims(batch):
+    """
+    TODO
+    :param batch:
+    :return:
+    """
     return batch.reshape(batch.shape[0] * batch.shape[1], *batch.shape[2:])
 
 
 def unsqueeze_first_dims(batch, n):
+    """
+    TODO
+    :param batch:
+    :param n:
+    :return:
+    """
     if n == 0 or n == 1 or batch is None:
         return batch
     return batch.reshape(n, batch.shape[0] // n, *batch.shape[1:])
 
 
 def replicate_tensor(t, n):
+    """
+    TODO
+    :param t:
+    :param n:
+    :return:
+    """
     return squeeze_first_dims(t.unsqueeze(0).expand(n, *([-1] * len(t.shape))))
 
 
 def replicate_batch(batch, n):
+    """
+    TODO
+    :param batch:
+    :param n:
+    :return:
+    """
     if n == 0 or n == 1 or batch is None:
         return batch
     return apply_to_collection(batch, torch.Tensor, replicate_tensor, n)
 
 
 def mean_replicated_batch(expanded_batch, n):
+    """
+    TODO
+    :param expanded_batch:
+    :param n:
+    :return:
+    """
     if n == 0 or n == 1:
         return expanded_batch
     return unsqueeze_first_dims(expanded_batch, n).mean(0)
 
 
 def std_replicated_batch(expanded_batch, n):
+    """
+    TODO
+    :param expanded_batch:
+    :param n:
+    :return:
+    """
     if n == 0 or n == 1:
         return expanded_batch
     return unsqueeze_first_dims(expanded_batch, n).std(0)
 
 
+def ema_inplace(moving_avg, new, decay):
+    """
+    TODO
+    :param moving_avg:
+    :param new:
+    :param decay:
+    :return:
+    """
+    moving_avg.data.mul_(decay).add_(new, alpha=(1 - decay))
+
+
+def laplace_smoothing(x, n_categories, eps=1e-5):
+    """
+    TODO
+    :param x:
+    :param n_categories:
+    :param eps:
+    :return:
+    """
+    return (x + eps) / (x.sum() + n_categories * eps)
+
+
 def human_format(num):
+    """
+    TODO
+    :param num:
+    :return:
+    """
     num = float('{:.3g}'.format(num))
     magnitude = 0
     while abs(num) >= 1000:
@@ -126,12 +197,25 @@ def human_format(num):
 
 
 def hasarg(callee, arg_name: str):
+    """
+    TODO
+    :param callee:
+    :param arg_name:
+    :return:
+    """
     func = getattr(callee, 'forward') if isinstance(callee, nn.Module) else callee
     callee_params = inspect.signature(func).parameters.keys()
     return arg_name in callee_params
 
 
 def permute_and_flatten(x: Tensor, permute_dims: Sequence[int], batch_first: bool = True) -> Tensor:
+    """
+    TODO
+    :param x:
+    :param permute_dims:
+    :param batch_first:
+    :return:
+    """
     remaining_dims = set(range(1, x.dim())).difference(set(permute_dims))
     if len(remaining_dims) == 0: return x.unsqueeze(0)
 
@@ -148,6 +232,14 @@ def unflatten_and_unpermute(
         permute_dims: Sequence[int],
         batch_first: bool = True
 ) -> Tensor:
+    """
+    TODO
+    :param xr:
+    :param orig_shape:
+    :param permute_dims:
+    :param batch_first:
+    :return:
+    """
     remaining_dims = set(range(1, len(orig_shape))).difference(set(permute_dims))
     if len(remaining_dims) == 0: return xr.squeeze(0)
 
@@ -163,3 +255,20 @@ def unflatten_and_unpermute(
             permutation_map[dim] = len(remaining_dims) + 1 + permute_dims.index(dim)
     x = x.permute(*permutation_map)
     return x.contiguous()
+
+
+def unsqueeze_like(tensor: torch.Tensor, like: torch.Tensor):
+    """
+    Unsqueeze last dimensions of tensor to match another tensor's number of dimensions.
+
+    Args:
+        tensor (torch.Tensor): tensor to unsqueeze
+        like (torch.Tensor): tensor whose dimensions to match
+    """
+    n_unsqueezes = like.ndim - tensor.ndim
+    if n_unsqueezes < 0:
+        raise ValueError(f"tensor.ndim={tensor.ndim} > like.ndim={like.ndim}")
+    elif n_unsqueezes == 0:
+        return tensor
+    else:
+        return tensor[(...,) + (None,) * n_unsqueezes]

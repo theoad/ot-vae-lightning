@@ -19,7 +19,7 @@ class FilterSequential(nn.Sequential):
 
 class GaussianFourierProjection(nn.Module):
     """Gaussian random features for encoding time steps."""
-    def __init__(self, dim: int, out_dim: Optional[int] = None, scale: float = 30., trainable: bool = False):
+    def __init__(self, dim: int, out_dim: Optional[int] = None, scale: float = 1., trainable: bool = True):
         super().__init__()
         self.dim = dim
         self.scale = scale

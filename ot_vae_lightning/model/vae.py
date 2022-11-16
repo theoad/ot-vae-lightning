@@ -152,7 +152,7 @@ class VAE(VisionModule):
         return (p for p in itertools.chain(self.encoder.parameters(), self.decoder.parameters(), self.prior.parameters()) if p.requires_grad)
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(
+        opt = torch.optim.Adam(
             self.optim_parameters(), lr=self.hparams.learning_rate, weight_decay=1e-4, betas=(0.9, 0.999)
         )
         if self.hparams.lr_sched_metric is None:
@@ -170,7 +170,7 @@ class VAE(VisionModule):
         return {"optimizer": opt, "lr_scheduler": lr_scheduler}
 
     def recon_loss(self, reconstructions: Tensor, target: Tensor, **kwargs) -> Tensor:
-        return F.mse_loss(reconstructions, target, reduction="none").sum(dim=(1, 2, 3)).mean()
+        return F.l1_loss(reconstructions, target, reduction="none").sum(dim=(1, 2, 3)).mean()
 
     def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
         return prior_loss.mean()

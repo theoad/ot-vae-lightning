@@ -23,7 +23,7 @@ from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import AutoEncoder
 from ot_vae_lightning.ot import LatentTransport
 
-_PSNR_PERFORMANCE = 13
+_PSNR_PERFORMANCE = 15
 _MAX_EPOCH = 2
 
 
@@ -117,4 +117,4 @@ def test_vae_latent_transport(prog_bar=False, batch_size=50):
 
 
 if __name__ == "__main__":
-    test_vae_latent_transport(True, 1000)
+    test_vae_latent_transport(True, 50)

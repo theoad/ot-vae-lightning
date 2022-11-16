@@ -114,6 +114,9 @@ class ImageNet224(TorchvisionDatamodule):
 
 class FFHQ128(TorchvisionDatamodule):
     IMG_SIZE = (128, 128)
+    _mean, _std = (0.5207, 0.4254, 0.3805), (0.1164, 0.1110, 0.1162)
+    _normalize = T.Normalize(_mean, _std)
+    _denormalize = UnNormalize(_mean, _std)
 
     def __init__(self, *args, **kwargs):
         super().__init__(
@@ -121,6 +124,7 @@ class FFHQ128(TorchvisionDatamodule):
             dataset_name='ImageFolder',
             root=('~/data/ffhq_128_train', '~/data/ffhq_128_test'),
             download=False,
-            train_transform=T.Compose([T.RandomHorizontalFlip(), T.ToTensor()]),
-            test_transform=T.ToTensor()
+            train_transform=T.Compose([T.RandomHorizontalFlip(), T.ToTensor(), FFHQ128._normalize]),
+            inference_preprocess=T.Compose([FFHQ128._normalize]),
+            inference_postprocess=T.Compose([FFHQ128._denormalize]),
         )

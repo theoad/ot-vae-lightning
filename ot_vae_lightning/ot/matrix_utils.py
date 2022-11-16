@@ -14,6 +14,7 @@ __all__ = [
     'is_symmetric',
     'min_eig',
     'make_psd',
+    'mean_cov',
     'STABILITY_CONST'
 ]
 
@@ -136,3 +137,17 @@ def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = F
     if return_correction:
         return res, small_val
     return res
+
+
+def mean_cov(sum: Tensor, sum_corr: Tensor, num_obs: Union[Tensor, int]) -> Tuple[Tensor, Tensor]:
+    """
+    Empirical computation of mean and covariance matrix
+
+    :param sum: Sum of feature vectors of shape [*, D]
+    :param sum_corr: Sum of covariance matrices of shape [*, D, D]
+    :param num_obs: Number of observations
+    :return: The features mean and covariance of shape [*, D] and [*, D, D]
+    """
+    mean = sum / num_obs
+    cov = sum_corr / num_obs - mean.unsqueeze(-1) @ mean.unsqueeze(-2)
+    return mean, cov

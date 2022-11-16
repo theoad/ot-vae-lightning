@@ -17,6 +17,7 @@ from torch import Tensor
 from torch.types import _size
 from ot_vae_lightning.prior import Prior
 from torch.distributions import Distribution, Normal
+from ot_vae_lightning.utils import unsqueeze_like
 
 
 class GaussianPrior(Prior):
@@ -68,11 +69,11 @@ class GaussianPrior(Prior):
     def reparametrization(self, z: Tensor, temperature: Optional[Tensor] = None) -> Distribution:
         if self.fixed_var:
             mu, var = z, torch.ones_like(z)
+            if temperature is not None:
+                var = var * unsqueeze_like(temperature, var) + 1e-8
         else:
             mu, log_var = torch.chunk(z, 2, self.reparam_dim)
             var = (log_var/2).exp()
-        # if temperature is not None:
-        #     var = var * temperature[:, None, None] + 1e-6
         return Normal(mu, var)
 
     def out_size(self, size: _size) -> _size:

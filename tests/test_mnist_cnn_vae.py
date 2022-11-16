@@ -24,17 +24,22 @@ from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import GaussianPrior
 from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import CNN, AutoEncoder
-from ot_vae_lightning.metrics import FrechetInceptionDistance
+from ot_vae_lightning.metrics.fid import FrechetInceptionDistance
 
-_PSNR_PERFORMANCE = 14
+_PSNR_PERFORMANCE = 13
 _MAX_EPOCH = 1
 
 
 def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
     seed_everything(42)
 
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar,
-                      accelerator='auto', devices='auto', num_sanity_val_steps=0)
+    trainer = Trainer(
+        max_epochs=_MAX_EPOCH,
+        enable_progress_bar=prog_bar,
+        accelerator='auto',
+        devices='auto',
+        num_sanity_val_steps=0
+    )
     datamodule = MNIST32(
         train_batch_size=batch_size,
         val_batch_size=batch_size,
@@ -95,8 +100,13 @@ def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
 def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
     seed_everything(42)
 
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar,
-                      accelerator='auto', devices='auto', num_sanity_val_steps=0)
+    trainer = Trainer(
+        max_epochs=_MAX_EPOCH,
+        enable_progress_bar=prog_bar,
+        accelerator='auto',
+        devices='auto',
+        num_sanity_val_steps=0
+    )
     datamodule = MNIST32(
         train_batch_size=batch_size,
         val_batch_size=batch_size,
@@ -187,8 +197,13 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
 
 
 def inference(ckpt_path, prog_bar=False, batch_size=50):
-    trainer = Trainer(max_epochs=_MAX_EPOCH, enable_progress_bar=prog_bar,
-                      accelerator='auto', devices='auto', num_sanity_val_steps=0)
+    trainer = Trainer(
+        max_epochs=_MAX_EPOCH,
+        enable_progress_bar=prog_bar,
+        accelerator='auto',
+        devices='auto',
+        num_sanity_val_steps=0
+    )
 
     # Inference
     vae = VAE.load_from_checkpoint(ckpt_path)
@@ -231,6 +246,7 @@ def inference(ckpt_path, prog_bar=False, batch_size=50):
         'psnr': PeakSignalNoiseRatio(),
         'fid': FrechetInceptionDistance(),
     }, prefix='test/metrics/')
+
     results = trainer.test(vae, dl)
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 

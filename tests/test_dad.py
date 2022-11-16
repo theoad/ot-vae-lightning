@@ -22,8 +22,7 @@ from ot_vae_lightning.prior.codebook import CodebookPrior as Vocabulary
 from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.networks import ViT
 
-_PSNR_PERFORMANCE = 11      # TODO: make this higher
-_TRANSPORT_PERFORMANCE = 11
+_PSNR_PERFORMANCE = 13      # TODO: make this higher
 _MAX_EPOCH = 2
 _DIM = 64
 
@@ -41,7 +40,7 @@ def test_dad(prog_bar=False, batch_size=32):
         image_size=28,
         patch_size=7,
         dim=_DIM,
-        depth=3,
+        depth=2,
         heads=4,
         mlp_dim=_DIM * 4,
         channels=1,
@@ -50,9 +49,9 @@ def test_dad(prog_bar=False, batch_size=32):
     )
 
     encoder = ViT(
-        n_embed_tokens=1,       # <SOS> token
+        n_embed_tokens=0,       # <SOS> token
         n_input_tokens=None,
-        output_tokens=['embed', 'input'],
+        output_tokens='input',
         patch_to_embed=True,
         embed_to_patch=False,
         **vit_tiny_cfg
@@ -78,14 +77,13 @@ def test_dad(prog_bar=False, batch_size=32):
     )
 
     vocab = Vocabulary(
-        num_embeddings=128,
+        num_embeddings=512,
         latent_size=encoder.out_size,
         embed_dims=(2,),
         similarity_metric='l2',
         separate_key_values=False,
         mode='sample',
-        loss='l2',
-        temperature=1e-3,
+        temperature=1,
         loss_coeff=1
     )
 
@@ -104,10 +102,11 @@ def test_dad(prog_bar=False, batch_size=32):
         autoregressive_decoder=autoregressive,        # p(zt-1 | zt)
         vocabulary=vocab,
         ce_coeff=1e-3,
-        prior_kwargs=vocab_config
+        prior_kwargs=vocab_config,
+        learning_rate=1e-3
     )
 
-    assert model.latent_size == torch.Size([(28 // 7) ** 2 + 1, vit_tiny_cfg['dim']])
+    assert model.latent_size == torch.Size([(28 // 7) ** 2, vit_tiny_cfg['dim']])
 
     # Train
     trainer = Trainer(

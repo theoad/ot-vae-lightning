@@ -20,13 +20,15 @@ class AutoDiffusion(VAE):
     def batch_preprocess(self, batch) -> VAE.Batch:
         pbatch = super().batch_preprocess(batch)
         batch_size = pbatch['samples'].size(0)
-        pbatch['kwargs']['time'] = torch.rand(batch_size, device=self.device)
+        t = torch.rand(batch_size, device=self.device)
+        t = 0.5 * torch.tanh(10 * (t-0.5)) + 0.5
+        pbatch['kwargs']['time'] = t
         return pbatch
 
     def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
         t = kwargs['time']
-        beta_t = 0.5 * (1 + torch.cos((1 + t) * torch.pi))
-        return (beta_t * prior_loss).mean()
+        # beta_t = 0.5 * torch.tanh(10 * (t-0.5)) + 0.5
+        return (t * prior_loss).mean()
 
     @VisionModule.postprocess
     def sample(

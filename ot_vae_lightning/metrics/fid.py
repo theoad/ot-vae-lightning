@@ -22,7 +22,7 @@ from collections import OrderedDict
 from torchmetrics.metric import Metric
 from torchmetrics.utilities import rank_zero_info
 from torchmetrics.image.fid import NoTrainInceptionV3, _compute_fid
-from ot_vae_lightning.ot import compute_mean_cov
+from ot_vae_lightning.ot.w2_utils import mean_cov
 
 
 class NoTrainInceptionV3NoStateDict(NoTrainInceptionV3):
@@ -143,7 +143,7 @@ class FrechetInceptionDistance(Metric):
     def compute(self) -> Tensor:
         """ Calculate FID score based on accumulated extracted features from the two distributions """
         if self.num_fake_obs < 1e3 or self.num_real_obs < 1000: return torch.ones(1) * float('inf')
-        real_mean, real_cov = compute_mean_cov(self.real_sum, self.real_correlation, self.num_real_obs)
-        fake_mean, fake_cov = compute_mean_cov(self.fake_sum, self.fake_correlation, self.num_fake_obs)
+        real_mean, real_cov = mean_cov(self.real_sum, self.real_correlation, self.num_real_obs)
+        fake_mean, fake_cov = mean_cov(self.fake_sum, self.fake_correlation, self.num_fake_obs)
         # compute fid
         return _compute_fid(real_mean, real_cov, fake_mean, fake_cov)
