@@ -61,10 +61,12 @@ class GaussianPrior(Prior):
     @staticmethod
     def closed_form_reverse_kl(p: Distribution, q: Distribution) -> Tensor:
         """KL(q, p), assuming q and p are Normally distributed"""
-        reduce_dim = list(range(1, len(q.mean.shape)))
-        return torch.sum(0.5 * (q.mean - p.mean) ** 2 / p.variance
-                         + p.variance.log() - q.variance.log()
-                         + q.variance / p.variance - 1, dim=reduce_dim)
+        dims = list(range(1, q.mean.dim()))
+        return 0.5 * torch.sum(
+            (q.mean - p.mean) ** 2 / p.variance +
+            p.variance.log() - q.variance.log() +
+            q.variance / p.variance - 1, dim=dims
+        )
 
     def reparametrization(self, z: Tensor, temperature: Optional[Tensor] = None) -> Distribution:
         if self.fixed_var:
@@ -77,8 +79,7 @@ class GaussianPrior(Prior):
         return Normal(mu, var)
 
     def out_size(self, size: _size) -> _size:
-        if self.fixed_var:
-            return size
+        if self.fixed_var: return size
         reparam_size = list(size)
         reparam_dim = self.reparam_dim - 1 if self.reparam_dim > 0 else self.reparam_dim
         reparam_size[reparam_dim] //= 2   # re-parametrization trick
@@ -89,7 +90,7 @@ class GaussianPrior(Prior):
         p = self.reparametrization(torch.zeros_like(x))
         z = q.rsample()
         loss = self.empirical_reverse_kl(p, q, z) if self.empirical_kl else self.closed_form_reverse_kl(p, q)
-        return z, loss
+        return x, loss
 
     def sample(self, shape: _size, device: torch.device) -> Tensor:   # noqa arguments-differ
         return torch.randn(*shape, device=device)

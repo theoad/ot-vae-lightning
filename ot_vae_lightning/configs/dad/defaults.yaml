@@ -3,7 +3,7 @@ trainer:
   enable_checkpointing: true
   accelerator: auto
   devices: auto
-  max_epochs: 10
+  max_epochs: 100
 #  gradient_clip_val: 1.0
   sync_batchnorm: false
   precision: 32
@@ -18,10 +18,10 @@ trainer:
       entity: gip
       dir: dad
       log_model: true
-      name: defaults
+      name: sweep-first_kl-deep-1
 model:
   expansion: 1
-  learning_rate: 2e-4
+  learning_rate: 1e-3
   lr_sched_metric: fid
   conditional: false
   checkpoints: null
@@ -38,8 +38,6 @@ model:
       dim: 128
       depth: 4
       heads: 8
-      mlp_dim: 512
-      channels: 3
       n_embed_tokens: 0
       output_tokens: input
   decoder:
@@ -47,7 +45,6 @@ model:
     init_args:
       depth: 4
       heads: 8
-      channels: 3
       n_embed_tokens: 0
       n_input_tokens: null    # linked to model.encoder.total_num_tokens (CLI)
       output_tokens: input
@@ -57,9 +54,8 @@ model:
     class_path: ot_vae_lightning.networks.vit.AutoRegressive
     init_args:
       vocab_size: null        # linked to model.vocabulary.num_embeddings (CLI)
-      depth: 4
+      depth: 2
       heads: 8
-      channels: 3
       n_embed_tokens: 0
       n_input_tokens: null    # linked to model.encoder.total_num_tokens (CLI)
       output_tokens: input
@@ -74,20 +70,20 @@ model:
       num_embeddings: 8192
       latent_size: null       # linked to model.encoder.out_size (CLI)
       embed_dims: [2]         # token dim
-      similarity_metric: l2
+      similarity_metric: cosine
       separate_key_values: false
       topk: null
       mode: mean                # 'mean', 'sample', 'argmax'
-      loss: null                # 'kl', 'first_kl', 'l2'
-      temperature: 1e-2
-      loss_coeff: 1
+      loss: first_kl              # 'kl', 'first_kl', 'l2'
+      temperature: 1e-3
+      loss_coeff: 1e-3
       annealing_steps: 0
 data:
   class_path: ot_vae_lightning.data.CIFAR10
   init_args:
     train_val_split: 0.9
     seed: 42
-    train_batch_size: 128
+    train_batch_size: 32
     val_batch_size: 128
     test_batch_size: 128
     num_workers: 8

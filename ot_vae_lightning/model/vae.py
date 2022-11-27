@@ -153,7 +153,7 @@ class VAE(VisionModule):
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(
-            self.optim_parameters(), lr=self.hparams.learning_rate, weight_decay=1e-4, betas=(0.9, 0.999)
+            self.optim_parameters(), lr=self.hparams.learning_rate, betas=(0.9, 0.999)
         )
         if self.hparams.lr_sched_metric is None:
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -170,7 +170,7 @@ class VAE(VisionModule):
         return {"optimizer": opt, "lr_scheduler": lr_scheduler}
 
     def recon_loss(self, reconstructions: Tensor, target: Tensor, **kwargs) -> Tensor:
-        return F.l1_loss(reconstructions, target, reduction="none").sum(dim=(1, 2, 3)).mean()
+        return F.mse_loss(reconstructions, target)
 
     def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
         return prior_loss.mean()
@@ -185,7 +185,7 @@ class VAE(VisionModule):
         reconstructions_mean = self._reduce_mean(reconstructions)
 
         prior_loss = self.prior_loss(prior_loss, **kwargs) / np.prod(samples.shape[1:])
-        recon_loss = self.recon_loss(reconstructions_mean, target, **kwargs) / np.prod(samples.shape[1:])
+        recon_loss = self.recon_loss(reconstructions_mean, target, **kwargs)
 
         loss = recon_loss + prior_loss
         logs = {

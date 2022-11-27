@@ -60,6 +60,7 @@ class Collage(Callback):
             if not (callable(method) and hasattr(method, 'is_collage') and method.is_collage): continue
             found = True
             images = method(pl_module.batch_preprocess(batch))
+            if len(images) == 0: continue
             collage = self.list_to_collage(images, self.num_samples)
             if trainer.logger is None:
                 warnings.warn('No logger found. Logging locally.')

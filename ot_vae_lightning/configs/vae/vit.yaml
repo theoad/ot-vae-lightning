@@ -6,59 +6,43 @@ trainer:
       entity: gip
       dir: vae
       log_model: true
-      name: vit
+      name: auto-diffuser-vit
 model:
   autoencoder: null
   encoder:
     class_path: ot_vae_lightning.networks.ViT
     init_args:
-      image_size: 32
+      image_size: 64
       patch_size: 8
-      dim: 128
+      dim: 256
       depth: 3
-      heads: 4
-      mlp_dim: 512
+      preprocess_depth: null
+      heads: 8
       channels: 3
-      dim_head: 32
       dropout: 0.1
       emb_dropout: 0.
-      n_embed_tokens: 0
+      n_embed_tokens: 1
       n_input_tokens: null
-      output_tokens: input
+      output_tokens: embed
       patch_to_embed: true
       embed_to_patch: false
       num_classes: null
+      time_dependant: false
   decoder:
     class_path: ot_vae_lightning.networks.ViT
     init_args:
-      image_size: 32
+      image_size: 64
       patch_size: 8
-      dim: 128
-      depth: 3
-      heads: 4
-      mlp_dim: 512
-      dim_head: 32
+      dim: 256
+      depth: 2
+      heads: 8
       channels: 3
       dropout: 0.1
       emb_dropout: 0
-      n_embed_tokens: 0
-      n_input_tokens: null
-      output_tokens: input
+      n_embed_tokens: null
+      n_input_tokens: 1
+      output_tokens: embed
       patch_to_embed: false
       embed_to_patch: true
       num_classes: null
-  prior_kwargs:
-    topk: null
-    mode: smooth  # 'smooth', 'sample'
-    loss: l2  # 'kl', 'l2'
-    commitment_cost: 0.25
-  prior:
-    class_path: ot_vae_lightning.prior.codebook.CodebookPrior
-    init_args:
-      num_embeddings: 8192
-      latent_size: [16, 128]
-      embed_dims: [1]
-      similarity_metric: l2
-      separate_key_values: false
-      loss_coeff: 0.1
-      annealing_steps: 0
+      time_dependant: false

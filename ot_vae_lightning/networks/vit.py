@@ -58,7 +58,7 @@ class PositionalEmbedding(nn.Module):
 
 class ViT(nn.Module):
     """
-    `PyTorch <https://pytorch.org/>`_ implementation of a modular ViT
+    `PyTorch <https://pytorch.org/>`_ implementation of a (very) modular ViT
 
     Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
@@ -72,6 +72,7 @@ class ViT(nn.Module):
             dim: int,
             patch_size: Optional[Union[int, Tuple[int, int]]] = None,
             depth: int = 6,
+            preprocess_depth: Optional[int] = None,
             heads: int = 8,
             mlp_dim: Optional[int] = None,
             channels: int = 3,
@@ -143,9 +144,12 @@ class ViT(nn.Module):
             output_tokens = [output_tokens]
         if not all(token_type in self.token_indices.keys() for token_type in output_tokens):
             raise ValueError(f"`output_tokens` must contain only keys within {self.token_indices.keys()}")
+
         self.output_tokens_indices = []
-        for token in output_tokens:
-            self.output_tokens_indices += self.token_indices[token]
+        self.cross_tokens_indices = []
+        for token_type, idx_list in self.token_indices.items():
+            if token_type in output_tokens: self.output_tokens_indices += idx_list
+            else: self.cross_tokens_indices += idx_list
 
         self.patch_to_embed = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
@@ -162,10 +166,22 @@ class ViT(nn.Module):
         self.time_token = GaussianFourierProjection(dim, trainable=True) if self.n_tokens['time'] > 0 else None
         self.positional_embed = PositionalEmbedding(self.total_num_tokens, dim, emb_dropout, True)
 
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer=nn.TransformerEncoderLayer(dim, heads, mlp_dim, dropout, batch_first=True),
-            num_layers=depth
-        )
+        if preprocess_depth is None:
+            self.prepocess = None
+            self.transformer = nn.TransformerEncoder(
+                encoder_layer=nn.TransformerEncoderLayer(dim, heads, mlp_dim, dropout, batch_first=True),
+                num_layers=depth
+            )
+        else:
+            self.prepocess = nn.TransformerEncoder(
+                encoder_layer=nn.TransformerEncoderLayer(dim, heads, mlp_dim, dropout, batch_first=True),
+                num_layers=preprocess_depth
+            ) if preprocess_depth > 0 else nn.Identity()
+
+            self.transformer = nn.TransformerDecoder(
+                decoder_layer=nn.TransformerDecoderLayer(dim, heads, mlp_dim, dropout, batch_first=True),
+                num_layers=depth
+            )
 
         if embed_to_patch:
             self.out_size = torch.Size([channels, image_height, image_width])
@@ -207,7 +223,6 @@ class ViT(nn.Module):
         return x
 
     def _causal_mask(self, x: Tensor) -> Optional[Tensor]:
-        # TODO: should mask only input indices
         if not self.causal_mask: return None
         return nn.Transformer.generate_square_subsequent_mask(x.size(1)).to(x.device)
 
@@ -219,14 +234,16 @@ class ViT(nn.Module):
         x = self._add_time_token(x, time)
 
         x = self.positional_embed(x)
-        mask = self._causal_mask(x)
 
-        x = self.transformer(x, mask=mask)
-        x = x[:, self.output_tokens_indices]
+        if self.prepocess is None:
+            out = self.transformer(x, mask=self._causal_mask(x))[:, self.output_tokens_indices]
+        else:
+            out = x[:, self.output_tokens_indices]
+            out = self.transformer(out, self.prepocess(x[:, self.cross_tokens_indices]), tgt_mask=self._causal_mask(out))
 
-        if not isinstance(self.embed_to_patch, nn.Identity): x = x[:, -self.num_patches:]
-        x = self.embed_to_patch(x)
-        return x
+        if not isinstance(self.embed_to_patch, nn.Identity): out = out[:, -self.num_patches:]
+        out = self.embed_to_patch(out)
+        return out
 
 
 class AutoRegressive(ViT):

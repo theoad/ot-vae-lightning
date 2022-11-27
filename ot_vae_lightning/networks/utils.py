@@ -19,12 +19,22 @@ class FilterSequential(nn.Sequential):
 
 class GaussianFourierProjection(nn.Module):
     """Gaussian random features for encoding time steps."""
-    def __init__(self, dim: int, out_dim: Optional[int] = None, scale: float = 1., trainable: bool = True):
+    def __init__(
+            self,
+            dim: int,
+            out_dim: Optional[int] = None,
+            n_layers: int = 3,
+            scale: float = 30.,
+            trainable: bool = False
+    ):
         super().__init__()
         self.dim = dim
         self.scale = scale
         self.weight = nn.Parameter(self._init_tensor, requires_grad=trainable)
-        self.proj = nn.Linear(dim, out_dim) if out_dim is not None else nn.Identity()
+        self.proj = nn.Sequential(
+            nn.Linear(dim, out_dim) if out_dim is not None else nn.Identity(),
+            *([nn.ReLU(), nn.Linear(out_dim, out_dim)] * (n_layers - 1))
+        )
 
     @property
     def _init_tensor(self):

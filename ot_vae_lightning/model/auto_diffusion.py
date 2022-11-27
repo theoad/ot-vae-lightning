@@ -21,14 +21,14 @@ class AutoDiffusion(VAE):
         pbatch = super().batch_preprocess(batch)
         batch_size = pbatch['samples'].size(0)
         t = torch.rand(batch_size, device=self.device)
-        t = 0.5 * torch.tanh(10 * (t-0.5)) + 0.5
+        # t = 0.5 * torch.tanh(10 * (t-0.5)) + 0.5
         pbatch['kwargs']['time'] = t
         return pbatch
 
     def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
-        t = kwargs['time']
-        # beta_t = 0.5 * torch.tanh(10 * (t-0.5)) + 0.5
-        return (t * prior_loss).mean()
+        t = self._expand(kwargs['time'])
+        beta_t = 0.5 * torch.tanh(10 * (t-0.5)) + 0.5
+        return (beta_t * prior_loss).mean()
 
     @VisionModule.postprocess
     def sample(
@@ -46,10 +46,12 @@ class AutoDiffusion(VAE):
         for i, s in enumerate(np.linspace(1, step_size, self.n_steps)):
             x_hat = self.decode(xs, **{**kwargs, 'time': ones * s}, no_postprocess_override=True)
             if improved_algorithm:
-                xs -= (
-                        self.encode(x_hat, **{**kwargs, 'time': ones * (s - step_size)}, no_preprocess_override=True) -
-                        self.encode(x_hat, **{**kwargs, 'time': ones * s}, no_preprocess_override=True)
-                )
+                try:
+                    xs -= (
+                            self.encode(x_hat, **{**kwargs, 'time': ones * (s - step_size)}, no_preprocess_override=True) -
+                            self.encode(x_hat, **{**kwargs, 'time': ones * s}, no_preprocess_override=True)
+                    )
+                except RuntimeError: return []
             else: xs = self.encode(x_hat, **{**kwargs, 'time': ones * (s - step_size)}, no_preprocess_override=True)
             if steps is not None and i in steps: intermediate.append(x_hat)
 

@@ -1,12 +1,13 @@
 seed_everything: 42
 trainer:
   enable_checkpointing: true
-  accelerator: auto
+  accelerator: gpu
   devices: auto
-  max_steps: 1000000
+  strategy: null
+  max_steps: 100000
   gradient_clip_val: 1.0
   sync_batchnorm: false
-  precision: 16
+#  precision: 16
   enable_model_summary: true
   weights_save_path: null
   num_sanity_val_steps: 2
@@ -21,7 +22,7 @@ trainer:
       name: auto_diffusion
 model:
   expansion: 1
-  learning_rate: 5e-4
+  learning_rate: 1e-3
 #  lr_sched_metric: fid
   conditional: false
   checkpoints: null
@@ -35,34 +36,36 @@ model:
   prior:
     class_path: ot_vae_lightning.prior.GaussianPrior
     init_args:
-      loss_coeff: 0.1
+      loss_coeff: 0
       reparam_dim: 1
-      empirical_kl: true
+      empirical_kl: false
       annealing_steps: 0
-      fixed_var: false
+      fixed_var: true
   autoencoder:
     class_path: ot_vae_lightning.networks.AutoEncoder
     init_args:
       in_features: 3
-      in_resolution: 128
-      latent_features: 512
-      latent_resolution: 4
-      double_encoded_features: true
+      in_resolution: 64
+      latent_features: 128
+      latent_resolution: 8
+      double_encoded_features: false
       capacity: 16
-      n_layers: 3
+      n_layers: 2
       down_up_sample: 2
-      normalization: group
+      normalization: batch
       activation: relu
-      equalized_lr: true
+      equalized_lr: false
       dropout: 0.
       residual: true
-      time_embed_dim: 128
+      time_embed_dim: null
+      max_attn_res: 0
+      bias: true
 data:
-  class_path: ot_vae_lightning.data.FFHQ128
+  class_path: ot_vae_lightning.data.FFHQ64
   init_args:
     train_val_split: 0.9
     seed: 42
-    train_batch_size: 32
+    train_batch_size: 64
     val_batch_size: 128
     test_batch_size: 128
     num_workers: 10

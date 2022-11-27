@@ -11,6 +11,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
+import math
 import warnings
 import torch
 from torch import Tensor
@@ -174,6 +175,20 @@ class ConvLayer(nn.Conv2d):
         return out
 
 
+class Conv1x1(ConvLayer):
+    def __init__(
+            self,
+            in_features: int,
+            out_features: int,
+            **kwargs  # overrides the defaults
+    ):
+        defaults = dict(
+            down_sample=False, up_sample=False, additional_embed=None, normalization=None, activation=None, equalized_lr=False,
+            dropout=0., stride=1, kernel_size=1, padding=0, dilation=1, groups=1, bias=False,
+        )
+        super().__init__(in_features, out_features, **{**defaults, **kwargs})
+
+
 # ******************************************************************************************************************** #
 
 
@@ -197,14 +212,10 @@ class AttentionBlock(nn.Module):
         self.residual = residual
         if channels % heads != 0:
             raise ValueError(f"q,k,v channels: {channels} is not divisible by heads: {heads}")
-        self.qkv = ConvLayer(
-            channels, channels * 3, False, False, additional_embed, normalization, None,
-            equalized_lr, 0., 1, 1, 0, 1, groups, False
-        )
+        self.qkv = Conv1x1(channels, channels * 3, additional_embed=additional_embed, normalization=normalization,
+                           equalized_lr=equalized_lr, groups=groups)
         self.attention = QKVAttention(heads)
-        self.proj_out = ConvLayer(
-            channels, channels, False, False, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False
-        )
+        self.proj_out = Conv1x1(channels, channels, equalized_lr=equalized_lr, groups=groups)
 
     def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
         b, c, *spatial = x.shape
@@ -279,7 +290,7 @@ class ConvBlock(nn.Module):
         """
         super().__init__()
         self.block = FilterSequential(
-            # # Attention when down-sampling
+            # # Attention when down-sampling TODO
             # AttentionBlock(in_features, n_attn_heads, additional_embed, normalization, equalized_lr, groups, residual)
             # if n_attn_heads > 0 and bool(down_sample) else nn.Identity(),
 
@@ -303,8 +314,8 @@ class ConvBlock(nn.Module):
 
         # Residual (skip) connection
         self.residual = nn.Sequential(
-            ConvLayer(in_features, out_features, down_sample, up_sample, None, None, None,
-                      equalized_lr, 0., 1, 1, 0, 1, groups, False),
+            Conv1x1(in_features, out_features, down_sample=down_sample, up_sample=up_sample,
+                    normalization=normalization, equalized_lr=equalized_lr, groups=groups),
         ) if residual else None
 
     def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
@@ -427,11 +438,13 @@ class CNN(nn.Module):
 
         self.out_size = torch.Size([out_features, out_resolution, out_resolution])
         self.blocks = FilterSequential(
-            ConvLayer(features[0], features[0], False, False, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
+            ConvLayer(features[0], features[0], False, False, additional_embed, None, None, equalized_lr, 0., 1, 1, 0, 1,
+                      groups, False),
             *[ConvBlock(ic, oc, heads(oc, r), n_layers, down_sample, up_sample, additional_embed, normalization,
                         activation, residual, equalized_lr, dropout, kernel_size, stride, padding, dilation, groups,
                         bias) for ic, oc, r in zip(features[:-1], features[1:], attn_resolutions)],
-            ConvLayer(features[-1], features[-1], False, False, None, None, None, equalized_lr, 0., 1, 1, 0, 1, groups, False),
+            ConvLayer(features[-1], features[-1], False, False, additional_embed, None, None, equalized_lr, 0., 1, 1, 0, 1,
+                      groups, False),
         )
 
     def forward(self, x: Tensor, embed: Optional[Tensor] = None) -> Tensor:
@@ -518,12 +531,14 @@ class AutoEncoder(nn.Module):
         :param bias: If ``True``, adds a learnable bias to the output. Default: ``True``
         """
         super().__init__()
+        cls_embed = 2 ** (int(math.log10(num_classes)) + 5) if bool(num_classes) else None
         self.latent_size = torch.Size([latent_features * (1 + int(double_encoded_features)), latent_resolution, latent_resolution])
-        self.class_embed = nn.Embedding(num_classes, latent_features) if bool(num_classes) else None
-        self.time_embed = GaussianFourierProjection(time_embed_dim, latent_features) if bool(time_embed_dim) else None
+        self.class_embed = nn.Embedding(num_classes, cls_embed) if bool(num_classes) else None
+        self.time_embed = GaussianFourierProjection(time_embed_dim, time_embed_dim) if bool(time_embed_dim) else None
 
-        if bool(self.class_embed) and bool(self.time_embed): additional_embed = 2 * latent_features
-        elif bool(self.class_embed) or bool(self.time_embed): additional_embed = latent_features
+        if bool(self.class_embed) and bool(self.time_embed): additional_embed = cls_embed + time_embed_dim
+        elif bool(self.class_embed): additional_embed = cls_embed
+        elif bool(self.time_embed): additional_embed = time_embed_dim
         else: additional_embed = None
 
         self.encoder = CNN(
