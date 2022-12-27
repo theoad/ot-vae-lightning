@@ -10,3 +10,4 @@ einops
 torch-ema
 accelerate
 lovely-tensors
+tensorboard
