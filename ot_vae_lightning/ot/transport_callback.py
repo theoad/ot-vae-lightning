@@ -11,8 +11,10 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
+import warnings
 from typing import Optional, Any, Tuple, Dict, List
 from itertools import accumulate
+from functools import partial
 from operator import mul
 
 from numpy.random import permutation
@@ -26,8 +28,10 @@ from pytorch_lightning.utilities.types import STEP_OUTPUT
 from pytorch_lightning.utilities import rank_zero_warn, move_data_to_device
 from pytorch_lightning import Callback
 
-from ot_vae_lightning.ot import GaussianTransport
-from ot_vae_lightning.utils.collage import Collage
+from ot_vae_lightning.ot.gaussian_transport import GaussianTransport
+import ot_vae_lightning.utils as utils
+
+__all__ = ['LatentTransport', 'ConditionalLatentTransport']
 
 
 class LatentTransport(Callback):
@@ -57,13 +61,16 @@ class LatentTransport(Callback):
             transport_type: str = "gaussian",
             transport_dims: _size = (1, 2, 3),
             diag: bool = False,
+            common_operator: bool = False,
             pg_star: float = 0.,
             stochastic: bool = False,
             persistent: bool = True,
             samples_key: str = 'samples',
             latents_key: str = 'latents',
             logging_prefix: Optional[str] = None,
-            transformed_latents_from_train: bool = False,
+            target_latents_from_train: bool = False,
+            source_latents_from_train: bool = False,
+            unpaired: bool = True,
             num_samples_to_log: int = 8,
             make_pd: bool = False,
             verbose: bool = False,
@@ -88,7 +95,7 @@ class LatentTransport(Callback):
          the transport, in the dictionary returned from the `training_step` of the pytorch-lightning module jointly
          trained with this callback.
         :param logging_prefix: The logging prefix where to log the results of the transport experiments.
-        :param transformed_latents_from_train: If ``True`` uses the latent representation of transformed training
+        :param source_latents_from_train: If ``True`` uses the latent representation of transformed training
          samples to update the transport operators. This is unadvised since it will slow down training and bias the
          transport experiment (as source and target samples will not come from unpaired distributions)
         :param num_samples_to_log: Number of image samples to log.
@@ -110,11 +117,25 @@ class LatentTransport(Callback):
         self.size = size
         self.transformations = transformations
         self.transport_dims = transport_dims
-        self.operator_dim = list(set(all_dims).difference(set(self.transport_dims)))
+        self.common_operator = common_operator
         self.dim = list(accumulate([size[i - 1] for i in self.transport_dims], mul))[-1]
-        self.num_operators = list(accumulate([size[i-1] for i in self.operator_dim], mul))[-1]\
-            if len(self.operator_dim) > 0 else 1
-        self.transformed_latents_from_train = transformed_latents_from_train
+
+        operator_dim = list(set(all_dims).difference(set(self.transport_dims)))
+        self.num_operators = list(accumulate([size[i-1] for i in operator_dim], mul))[-1]\
+            if len(operator_dim) > 0 and not common_operator else 1
+        self._permute_and_flatten = partial(utils.permute_and_flatten, permute_dims=self.transport_dims, batch_first=False)
+        self._unflatten_and_unpermute = partial(utils.unflatten_and_unpermute, permute_dims=self.transport_dims, batch_first=False)
+        self.unpaired = unpaired
+        self.source_latents_from_train = source_latents_from_train
+        self.target_latents_from_train = target_latents_from_train
+        if self.source_latents_from_train or self.target_latents_from_train:
+            rank_zero_warn(f"""
+            `source_latents_from_train` or `target_latents_from_train` set to ``True``.
+            The callback will use the training samples to computer the transport operator.
+            This is unadvised because is may bias the transport experiment (as source and target samples
+            will not come from unseen data).
+            To silence this warning, pass `verbose=False` to the constructor of the callback.
+            """)
 
         self.samples_key = samples_key
         self.latents_key = latents_key
@@ -125,7 +146,6 @@ class LatentTransport(Callback):
         self.class_idx = class_idx
         self.conditional_key = conditional_key
 
-        self.val_metrics = None
         self.test_metrics = None
 
         self.transport_operators = torch.nn.ModuleList([
@@ -141,8 +161,8 @@ class LatentTransport(Callback):
         ])
 
     def on_fit_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
-        self.val_metrics = pl_module.val_metrics.clone(prefix=self.logging_prefix) if self.transformed_latents_from_train else None
         self.test_metrics = pl_module.test_metrics.clone(prefix=self.logging_prefix)
+        self.transport_operators = self.transport_operators.to(pl_module.device)
 
     def on_train_epoch_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         for operator in self.transport_operators:
@@ -158,36 +178,39 @@ class LatentTransport(Callback):
             batch_idx: int,
             unused: int = 0,
     ) -> None:
-        samples, kwargs = self._get_samples(pl_module, outputs)
+        if not self.target_latents_from_train and not self.source_latents_from_train:
+            return
 
-        if self.latents_key in outputs.keys():
-            self._update_transport_operators(outputs[self.latents_key], source=False)
-        else:
-            if self.verbose:
-                rank_zero_warn(f"""
-                Usage of the {LatentTransport.__class__.__name__} callback will try to learn the distribution of the 
-                latent variables emitted by {pl_module.__class__.__name__} during training. The training latents are 
-                expected to be found the dictionary outputted by the `training_step` with the key {self.latents_key}. 
-                Since this key was not found, the callback will use the `encode` method of 
-                {pl_module.__class__.__name__} to compute the latents which might not be the desired behaviour and 
-                result in a performance hit. To silence this warning, pass `verbose=False` to the constructor 
-                of the callback.
-                """)
-            pl_module.eval()
-            self._update_transport_operators(self._encode(pl_module, samples, **kwargs), source=False)
+        # The `batch_idx % 2` condition makes sure source and target come from unpaired distributions
+        if self.target_latents_from_train and (not self.unpaired or not self.source_latents_from_train or batch_idx % 2 == 0):
+            if self.latents_key in outputs.keys():
+                self._update_transport_operators(outputs[self.latents_key].detach(), source=False)
+            else:
+                if self.verbose and batch_idx == 0:
+                    rank_zero_warn(f"""
+                    Usage of the {LatentTransport.__class__.__name__} callback will try to learn the distribution of the 
+                    latent variables emitted by {pl_module.__class__.__name__} during training. The training latents are 
+                    expected to be found the dictionary outputted by the `training_step` with the key {self.latents_key}. 
+                    Since this key was not found, the callback will use the `encode` method of 
+                    {pl_module.__class__.__name__} to compute the latents which might not be the desired behaviour and 
+                    result in a performance hit. To silence this warning, pass `verbose=False` to the constructor 
+                    of the callback.
+                    """)
+                    pl_module.eval()
+                    samples, kwargs = self._get_samples(pl_module, outputs)
+                    self._update_transport_operators(self._encode(pl_module, samples, **kwargs).detach(), source=False)
+                    pl_module.train()
 
-        if self.transformed_latents_from_train:
-            if self.verbose:
+        if self.source_latents_from_train and (not self.unpaired or not self.target_latents_from_train or batch_idx % 2 == 1):
+            if self.verbose and batch_idx < 2:
                 rank_zero_warn(f"""
                 The callback will use the `encode` method of {pl_module.__class__.__name__} to compute the latents of 
-                the transformed distribution. This is unadvised since it will slow down training and bias the transport 
-                experiment (as source and target samples will not come from unpaired distributions). To silence this 
-                warning, pass `verbose=False` to the constructor of the callback.
+                the transformed distribution. This is unadvised since it will slow down training.
                 """)
             pl_module.eval()
-            self._update_transport_operators(self._encode(pl_module, self.transformations(samples), **kwargs), source=True)
-
-        pl_module.train()
+            samples, kwargs = self._get_samples(pl_module, outputs)
+            self._update_transport_operators(self._encode(pl_module, self.transformations(samples), **kwargs).detach(), source=True)
+            pl_module.train()
 
     @torch.no_grad()
     def on_validation_batch_end(
@@ -199,16 +222,16 @@ class LatentTransport(Callback):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        if self.transformed_latents_from_train:
-            if self.val_metrics is not None:
+        # The `batch_idx % 2` condition makes sure source and target come from unpaired distributions
+        if not self.target_latents_from_train and (not self.unpaired or self.source_latents_from_train or batch_idx % 2 == 0):
+            if self.latents_key in outputs.keys():
+                self._update_transport_operators(outputs[self.latents_key].detach(), source=False)
+            else:
                 samples, kwargs = self._get_samples(pl_module, outputs)
-                latents = self._encode(pl_module, self.transformations(samples), **kwargs)
-                samples_transported = self._decode(pl_module, self._transport(latents), **kwargs)
-                self.val_metrics.update(samples_transported, samples)
-            return
-
-        samples, kwargs = self._get_samples(pl_module, outputs)
-        self._update_transport_operators(self._encode(pl_module, self.transformations(samples), **kwargs), source=True)
+                self._update_transport_operators(self._encode(pl_module, samples, **kwargs).detach(), source=False)
+        if not self.source_latents_from_train and (not self.unpaired or self.target_latents_from_train or batch_idx % 2 == 1):
+            samples, kwargs = self._get_samples(pl_module, outputs)
+            self._update_transport_operators(self._encode(pl_module, self.transformations(samples), **kwargs), source=True)
 
     @torch.no_grad()
     def on_test_batch_end(
@@ -230,7 +253,7 @@ class LatentTransport(Callback):
 
     @torch.no_grad()
     def on_validation_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
-        if trainer.sanity_checking:
+        if trainer.sanity_checking and (self.source_latents_from_train or self.target_latents_from_train):
             return
 
         # Compute the transport cost distance
@@ -248,20 +271,12 @@ class LatentTransport(Callback):
         if self.test_metrics is not None:
             pl_module.log_dict(self.test_metrics.compute())
 
-    def on_validation_epoch_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
-        if self.val_metrics is not None:
-            self.val_metrics.reset()
-
     def on_test_epoch_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         if self.test_metrics is not None:
             self.test_metrics.reset()
 
     def _update_transport_operators(self, latents: Tensor, source: bool) -> None:
-        latents_rearranged = latents.permute(*self.operator_dim, 0, *self.transport_dims)
-        if len(self.operator_dim) > 0:
-            latents_rearranged = latents_rearranged.flatten(0, len(self.operator_dim) - 1)
-        else:
-            latents_rearranged = latents_rearranged.unsqueeze(0)
+        latents_rearranged = self._permute_and_flatten(latents, flatten_batch=self.common_operator)
         key = 'source_samples' if source else 'target_samples'
         for latent, transport_operator in zip(latents_rearranged, self.transport_operators):
             transport_operator.update(**{key: latent.to(transport_operator.device)})
@@ -328,34 +343,34 @@ class LatentTransport(Callback):
         return pl_module.decode(latents, **kwargs)
 
     def _transport(self, latents: Tensor) -> Tensor:
-        permutation_map = list(range(latents.dim()))
-        permutation_map[0] = len(self.operator_dim)
-        for dim in range(1, latents.dim()):
-            if dim in self.operator_dim:
-                permutation_map[dim] = self.operator_dim.index(dim)
-            else:
-                assert dim in self.transport_dims, f"Flow assertion error !!!"
-                permutation_map[dim] = len(self.operator_dim) + 1 + self.transport_dims.index(dim)
+        orig_shape = latents.shape
 
-        if len(self.operator_dim) > 0:
-            latents_rearranged = latents.permute(*self.operator_dim, 0, *self.transport_dims)
-            latents_rearranged = latents_rearranged.flatten(0, len(self.operator_dim) - 1)
-        else:
-            latents_rearranged = latents.unsqueeze(0)
+        latents_rearranged = self._permute_and_flatten(latents)
+
         latents_transported = torch.stack([
-            transport_operator.transport(latent)
-            for latent, transport_operator in zip(latents_rearranged, self.transport_operators)
+            self.transport_operators[0 if self.common_operator else i].transport(latent)
+            for i, latent in enumerate(latents_rearranged)
         ])
 
-        if len(self.operator_dim) > 0:
-            latents_transported = latents_transported.unflatten(0, [self.size[d - 1] for d in self.operator_dim])  # type: ignore[arg-type]
-        else:
-            latents_transported = latents_transported.squeeze(0)
+        latents_transported = self._unflatten_and_unpermute(latents_transported, orig_shape)
 
-        latents_transported = latents_transported.permute(*permutation_map)
         assert latents_transported.shape == latents.shape, "Tensor shape assertion error !!!"
 
         return latents_transported
+
+    def _sample_like(self, latents: Tensor, from_dist='source'):
+        rearranged_shape = self._permute_and_flatten(latents).shape
+
+        latents_sampled = torch.stack([
+            self.transport_operators[0 if self.common_operator else i].sample(
+                rearranged_shape[1:], latents.dtype, latents.device, from_dist
+            ) for i in range(rearranged_shape[0])
+        ])
+        latents_sampled = self._unflatten_and_unpermute(latents_sampled, latents.shape)
+
+        assert latents_sampled.shape == latents.shape, "Tensor shape assertion error !!!"
+
+        return latents_sampled
 
     def _collage(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> List[Tensor]:
         # Get validation samples from the target (real) distribution
@@ -368,13 +383,16 @@ class LatentTransport(Callback):
         latents = self._encode(pl_module, transformed, **kwargs)
         transformed_decoded = self._decode(pl_module, latents, **kwargs)
         samples_transported = self._decode(pl_module, self._transport(latents), **kwargs)
-        img_list = [transformed, transformed_decoded, samples_transported, samples]
+        samples_source = self._decode(pl_module, self._sample_like(latents, 'source'), **kwargs)
+        samples_target = self._decode(pl_module, self._sample_like(latents, 'target'), **kwargs)
 
-        collage = Collage.list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
+        img_list = [samples_source, transformed, transformed_decoded, samples_transported, samples_target, samples]
+
+        collage = utils.Collage.list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
         return collage
 
     def _val_dist(self):
-        mean_dist = sum([t.compute() for t in self.transport_operators]) / len(self.transport_operators)
+        mean_dist = sum(t.compute() for t in self.transport_operators) / len(self.transport_operators)
         return mean_dist
 
 
@@ -422,7 +440,7 @@ class ConditionalLatentTransport(Callback):
         [t.on_test_batch_end(*args, **kwargs) for t in self.transports]
 
     def on_validation_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"):
-        if trainer.sanity_checking:
+        if trainer.sanity_checking and self.transports[0].source_latents_from_train:
             return
 
         avg_dist = sum([t._val_dist() for t in self.transports]) / self.num_classes
@@ -438,7 +456,7 @@ class ConditionalLatentTransport(Callback):
             for i in collage_indices:
                 collage.append(self.transports[i]._collage(trainer, pl_module))
 
-        collage = Collage.list_to_collage(collage, self.num_samples_to_log)
+        collage = utils.Collage.list_to_collage(collage, self.num_samples_to_log)
 
         if hasattr(trainer.logger, 'log_image'):
             trainer.logger.log_image(self.log_prefix, [collage], trainer.global_step)

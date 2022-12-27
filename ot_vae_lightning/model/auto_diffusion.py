@@ -4,12 +4,13 @@ import numpy as np
 
 import torch
 from torch import Tensor
-import torch.nn.functional as F
 import ot_vae_lightning.utils as utils
-from ot_vae_lightning.model.base import VisionModule
-from ot_vae_lightning.model.vae import VAE, VaeCLI
+from ot_vae_lightning.model.base import VisionModule, VisionCLI
+from ot_vae_lightning.model.vae import VAE
 from ot_vae_lightning.utils import Collage
 from ot_vae_lightning.data import TorchvisionDatamodule
+
+__all__ = ['AutoDiffusion']
 
 
 class AutoDiffusion(VAE):
@@ -85,7 +86,7 @@ class AutoDiffusion(VAE):
 
 
 if __name__ == '__main__':
-    cli = VaeCLI(
+    cli = VisionCLI(
         AutoDiffusion, TorchvisionDatamodule,
         subclass_mode_model=False,
         subclass_mode_data=True,

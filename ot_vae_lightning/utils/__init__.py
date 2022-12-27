@@ -1,8 +1,9 @@
 import inspect
 from copy import copy
 
-from typing import Union, Sequence, Callable, List, Tuple
+from typing import Union, Sequence, Callable, List
 import contextlib
+import numpy as np
 
 import torch
 from torch import Tensor
@@ -10,7 +11,9 @@ import torchvision.transforms as T
 import torch.nn as nn
 from pytorch_lightning.utilities.apply_func import apply_to_collection
 from pytorch_lightning.utilities import rank_zero_info
-from ot_vae_lightning.utils.collage import Collage
+from ot_vae_lightning.utils.collage import *
+from ot_vae_lightning.utils.elr import *
+from ot_vae_lightning.utils.partial_checkpoint import *
 
 
 class ToTensor(T.ToTensor):
@@ -182,20 +185,6 @@ def laplace_smoothing(x, n_categories, eps=1e-5):
     return (x + eps) / (x.sum() + n_categories * eps)
 
 
-def human_format(num):
-    """
-    TODO
-    :param num:
-    :return:
-    """
-    num = float('{:.3g}'.format(num))
-    magnitude = 0
-    while abs(num) >= 1000:
-        magnitude += 1
-        num /= 1000.0
-    return '{}{}'.format('{:f}'.format(num).rstrip('0').rstrip('.'), ['', 'K', 'M', 'B', 'T'][magnitude])
-
-
 def hasarg(callee, arg_name: str):
     """
     TODO
@@ -208,13 +197,14 @@ def hasarg(callee, arg_name: str):
     return arg_name in callee_params
 
 
-def permute_and_flatten(x: Tensor, permute_dims: Sequence[int], batch_first: bool = True) -> Tensor:
+def permute_and_flatten(
+        x: Tensor,
+        permute_dims: Sequence[int],
+        batch_first: bool = True,
+        flatten_batch: bool = False
+) -> Tensor:
     """
     TODO
-    :param x:
-    :param permute_dims:
-    :param batch_first:
-    :return:
     """
     remaining_dims = set(range(1, x.dim())).difference(set(permute_dims))
     if len(remaining_dims) == 0: return x.unsqueeze(0)
@@ -222,7 +212,10 @@ def permute_and_flatten(x: Tensor, permute_dims: Sequence[int], batch_first: boo
     if batch_first: x_rearranged = x.permute(0, *remaining_dims, *permute_dims)
     else:           x_rearranged = x.permute(*remaining_dims, 0, *permute_dims)
 
-    x_rearranged = x_rearranged.flatten(int(batch_first), len(remaining_dims) - int(not batch_first))
+    x_rearranged = x_rearranged.flatten(
+        int(batch_first and not flatten_batch),
+        len(remaining_dims) - int(not batch_first and not flatten_batch))
+    if flatten_batch: x_rearranged = x_rearranged.unsqueeze(0)
     return x_rearranged.contiguous()
 
 
@@ -230,18 +223,20 @@ def unflatten_and_unpermute(
         xr: Tensor,
         orig_shape: Sequence[int],
         permute_dims: Sequence[int],
-        batch_first: bool = True
+        batch_first: bool = True,
+        flatten_batch: bool = False
 ) -> Tensor:
     """
     TODO
-    :param xr:
-    :param orig_shape:
-    :param permute_dims:
-    :param batch_first:
-    :return:
     """
     remaining_dims = set(range(1, len(orig_shape))).difference(set(permute_dims))
     if len(remaining_dims) == 0: return xr.squeeze(0)
+
+    if flatten_batch:
+        xr = xr.squeeze(0)
+        bs = orig_shape[0]
+        n_elem_remaining = np.prod([orig_shape[d] for d in remaining_dims])
+        xr = xr.unflatten(0, [bs, n_elem_remaining] if batch_first else [n_elem_remaining, bs])
 
     x = xr.unflatten(int(batch_first), [orig_shape[d] for d in remaining_dims])  # type: ignore[arg-type]
 

@@ -22,19 +22,19 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.transforms.transforms import GaussianBlur
+import torchvision.transforms as T
 
 from torchmetrics import MetricCollection
 
-import ot_vae_lightning.data    # noqa: F401
+from ot_vae_lightning.model.base import VisionModule, VisionCLI
 import ot_vae_lightning.utils as utils
 import ot_vae_lightning.data.progressive_callback as progressive
 from ot_vae_lightning.prior import Prior
-from ot_vae_lightning.model.base import VisionModule, VisionCLI
-from ot_vae_lightning.utils import Collage
 from ot_vae_lightning.ot import LatentTransport
-from ot_vae_lightning.data import TorchvisionDatamodule, ProgressiveTransform, PgTransform
-from ot_vae_lightning.utils.partial_checkpoint import PartialCheckpoint
+from ot_vae_lightning.data import TorchvisionDatamodule
+from ot_vae_lightning.utils import Collage, FilterKwargs, PartialCheckpoint
+
+__all__ = ['VAE']
 
 
 class VAE(VisionModule):
@@ -49,14 +49,14 @@ class VAE(VisionModule):
     """
 
     Batch = Dict[str, Union[Tensor, Dict]]
-    filter_kwargs = utils.FilterKwargs
-    filter_kwargs.__init__ = functools.partialmethod(filter_kwargs.__init__, arg_keys='labels')
+    filter_kwargs = FilterKwargs
+    filter_kwargs.__init__ = functools.partialmethod(FilterKwargs.__init__, arg_keys='labels')
 
     # noinspection PyUnusedLocal
     def __init__(
             self,
-            prior: Prior,
             *,
+            prior: Optional[Prior] = None,
             autoencoder: Optional[nn.Module] = None,
             encoder: Optional[nn.Module] = None,
             decoder: Optional[nn.Module] = None,
@@ -87,7 +87,8 @@ class VAE(VisionModule):
 
         ------------------------------------------------------------------------------------
 
-        :param prior: prior class (derived from abstract class Prior)
+        :param prior: prior class (derived from abstract class Prior). If left unfilled, the class will behave like a
+                      regular auto-encoder
         :param autoencoder: A nn.Module with methods `self.encode` and `self.decode`.
                             Can be left unfilled if `encoder and `decoder` parameter are filled.
         :param encoder: A nn.Module with method `self.encode`. Can be left unfilled if `autoencoder` is filled
@@ -105,7 +106,8 @@ class VAE(VisionModule):
 
         self.loss = self.nelbo
         self.prior = prior
-        self._warn_call('prior.forward'); self._warn_call('prior.sample')
+        if self.prior is not None: self._warn_call('prior.forward'); self._warn_call('prior.sample')
+
         if autoencoder is not None:
             assert (
                     isinstance(autoencoder, nn.Module) and
@@ -147,9 +149,10 @@ class VAE(VisionModule):
         return reconstructions
 
     def optim_parameters(self):
-        if hasattr(self, 'autoencoder'):
-            return (p for p in itertools.chain(self.autoencoder.parameters(), self.prior.parameters()) if p.requires_grad)
-        return (p for p in itertools.chain(self.encoder.parameters(), self.decoder.parameters(), self.prior.parameters()) if p.requires_grad)
+        param_list = [self.autoencoder.parameters()] if hasattr(self, 'autoencoder') else \
+            [self.encoder.parameters(), self.decoder.parameters()]
+        if self.prior is not None: param_list.append(self.prior.parameters())
+        return filter(lambda p: p.requires_grad, itertools.chain(*param_list))
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(
@@ -206,6 +209,7 @@ class VAE(VisionModule):
         else:
             assert hasattr(self, 'encoder')
             enc_out = self.encoder.out_size
+        if self.prior is None: return enc_out
         return self.prior.out_size(enc_out)
 
     @VisionModule.preprocess
@@ -219,7 +223,11 @@ class VAE(VisionModule):
         with self.filter_kwargs(self._encode_func) as encode, self.filter_kwargs(self.prior) as prior:
             encodings = encode(samples, **kwargs)
             if expand: encodings, kwargs = self._expand(encodings), self._expand(kwargs)
-            latents, prior_loss = prior(encodings, **kwargs, step=self.global_step, **self.prior_kwargs)
+
+            if self.prior is None:
+                latents, prior_loss = encodings, torch.zeros(encodings.size(0), out=torch.empty_like(encodings))
+            else:
+                latents, prior_loss = prior(encodings, **kwargs, step=self.global_step, **self.prior_kwargs)
 
         if return_prior_loss:
             assert not self.inference, 'The prior loss cannot be returned when the model is in inference mode'
@@ -237,8 +245,10 @@ class VAE(VisionModule):
 
     @VisionModule.postprocess
     def sample(self, batch_size: int, **kwargs) -> Tensor:
-        with self.filter_kwargs(self.prior.sample) as sample:
-            latents = sample((batch_size, *self.latent_size), device=self.device, **kwargs)
+        if self.prior is not None:
+            with self.filter_kwargs(self.prior.sample) as sample:
+                latents = sample((batch_size, *self.latent_size), device=self.device, **kwargs)
+        else: latents = torch.randn((batch_size, *self.latent_size), device=self.device)
 
         return self.decode(latents, **kwargs, no_postprocess_override=True)
 
@@ -274,18 +284,18 @@ class VAE(VisionModule):
             """)
 
 
-class VaeCLI(VisionCLI):
-    def add_arguments_to_parser(self, parser):
-        super().add_arguments_to_parser(parser)
-        parser.add_lightning_class_args(Collage, "collage")
-        parser.set_defaults({"collage.log_interval": 100, "collage.num_samples": 8})
-        # parser.link_arguments("data.IMG_SIZE", "model.encoder.init_args.image_size", apply_on="instantiate")
-        # parser.link_arguments("data.IMG_SIZE", "model.decoder.init_args.image_size", apply_on="instantiate")
-        # parser.link_arguments("model.encoder.init_args.dim", "model.decoder.init_args.dim", apply_on="instantiate")
-
-
 if __name__ == '__main__':
-    cli = VaeCLI(
+    import re
+    import lovely_tensors as lt
+    import ot_vae_lightning.data  # noqa: F401
+
+    lt.monkey_patch()
+    # torch.set_float32_matmul_precision('high')
+
+    def camel2snake(name):
+        return name[0].lower() + re.sub(r'(?!^)[A-Z]', lambda x: '_' + x.group(0).lower(), name[1:])
+
+    cli = VisionCLI(
         VAE, TorchvisionDatamodule,
         subclass_mode_model=False,
         subclass_mode_data=True,
@@ -294,38 +304,34 @@ if __name__ == '__main__':
         run=False
     )
 
-    transport_kwargs = dict(
-        size=cli.model.latent_size,
-        transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
-        transport_type="gaussian",
-        transformed_latents_from_train=True,
-        make_pd=True,
-        verbose=True,
-        pg_star=0,
-    )
+    transforms = [
+        T.GaussianBlur(5, sigma=(2, 2)),
+        T.GaussianBlur(9, sigma=(4, 4)),
+        T.RandomErasing(p=1., scale=list(np.linspace(0.1, 2, 10)), ratio=list(np.linspace(0.01, 5, 10))),
+        T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
+        T.RandomPerspective(distortion_scale=0.25, p=1.),
+        T.RandomRotation(20),
+        T.Compose([T.Lambda(lambda t: (255 * t).type(torch.uint8)), T.RandAugment(5, 8), T.Lambda(lambda t: t.float() / 255)])
+    ]
 
-    # ProgressiveGaussianBlur = PgTransform(
-    #     GaussianBlur, {'sigma': list(zip(np.linspace(10, 0, 50), np.linspace(10, 0, 50)))[:-1]}, kernel_size=3
-    # )
-
-    callbacks = [
-        # ProgressiveTransform(ProgressiveGaussianBlur, list(range(50))),
+    cli.trainer.callbacks += [
         LatentTransport(
             transport_dims=(1,),
             diag=False,
             stochastic=False,
-            logging_prefix="mat_per_needle",
-            **transport_kwargs
-        ),
-        LatentTransport(
-            transport_dims=(1,),
-            diag=True,
-            stochastic=False,
-            logging_prefix="mat_per_needle_diag",
-            **transport_kwargs
-        ),
+            logging_prefix=f"mat_per_needle_{camel2snake(transform.__class__.__name__)}",
+            size=cli.model.latent_size,
+            transformations=transform,
+            transport_type="gaussian",
+            source_latents_from_train=False,
+            target_latents_from_train=False,
+            unpaired=True,
+            make_pd=True,
+            verbose=True,
+            pg_star=0,
+            common_operator=True
+        ) for transform in transforms
     ]
 
-    cli.trainer.callbacks += callbacks
     cli.trainer.fit(cli.model, cli.datamodule)
     cli.trainer.test(cli.model, cli.datamodule)

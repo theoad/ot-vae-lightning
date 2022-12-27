@@ -2,8 +2,23 @@ import os
 from collections import OrderedDict
 
 import torch
-from ot_vae_lightning.utils import human_format
 from pytorch_lightning.utilities.memory import get_model_size_mb
+
+__all__ = ['PartialCheckpoint', 'human_format']
+
+
+def human_format(num):
+    """
+    TODO
+    :param num:
+    :return:
+    """
+    num = float('{:.3g}'.format(num))
+    magnitude = 0
+    while abs(num) >= 1000:
+        magnitude += 1
+        num /= 1000.0
+    return '{}{}'.format('{:f}'.format(num).rstrip('0').rstrip('.'), ['', 'K', 'M', 'B', 'T'][magnitude])
 
 
 class PartialCheckpoint:

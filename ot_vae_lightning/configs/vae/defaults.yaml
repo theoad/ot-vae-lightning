@@ -1,17 +1,10 @@
 seed_everything: 42
 trainer:
-  enable_checkpointing: true
-  accelerator: gpu
-  devices: auto
-  strategy: null
   max_steps: 100000
-  gradient_clip_val: 1.0
-  sync_batchnorm: false
+#  devices: auto
+#  strategy: ddp_find_unused_parameters_false
+#  gradient_clip_val: 1.0
 #  precision: 16
-  enable_model_summary: true
-  weights_save_path: null
-  num_sanity_val_steps: 2
-  benchmark: true
   logger:
     class_path: pytorch_lightning.loggers.WandbLogger
     init_args:
@@ -19,53 +12,40 @@ trainer:
       entity: gip
       dir: vae
       log_model: true
-      name: auto_diffusion
+      name: ffhq-128x8x8
 model:
-  expansion: 1
   learning_rate: 1e-3
-#  lr_sched_metric: fid
-  conditional: false
-  checkpoints: null
-#  ema_decay: 0.999
   metrics:
     class_path: torchmetrics.MetricCollection
     init_args:
       metrics:
         psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
         fid: ot_vae_lightning.metrics.fid.FrechetInceptionDistance
-  prior:
-    class_path: ot_vae_lightning.prior.GaussianPrior
-    init_args:
-      loss_coeff: 0
-      reparam_dim: 1
-      empirical_kl: false
-      annealing_steps: 0
-      fixed_var: true
   autoencoder:
     class_path: ot_vae_lightning.networks.AutoEncoder
     init_args:
       in_features: 3
-      in_resolution: 64
+      in_resolution: 128
       latent_features: 128
       latent_resolution: 8
       double_encoded_features: false
-      capacity: 16
+      capacity: 32
       n_layers: 2
       down_up_sample: 2
       normalization: batch
-      activation: relu
-      equalized_lr: false
+      activation: leaky
+      equalized_lr: 1
       dropout: 0.
-      residual: true
+      residual: add
       time_embed_dim: null
       max_attn_res: 0
       bias: true
 data:
-  class_path: ot_vae_lightning.data.FFHQ64
+  class_path: ot_vae_lightning.data.FFHQ128
   init_args:
-    train_val_split: 0.9
+    test_val_split: 0.9
     seed: 42
-    train_batch_size: 64
-    val_batch_size: 128
-    test_batch_size: 128
+    train_batch_size: 50
+    val_batch_size: 100
+    test_batch_size: 100
     num_workers: 10

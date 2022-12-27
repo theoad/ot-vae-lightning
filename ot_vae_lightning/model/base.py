@@ -13,6 +13,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 """
 from typing import Optional, Dict, Any, Callable
 from abc import ABC, abstractmethod
+import importlib.util
 import functools
 
 import torch
@@ -20,10 +21,15 @@ import wandb
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers.wandb import WandbLogger
+from pytorch_lightning.callbacks import (
+    EarlyStopping, RichProgressBar, RichModelSummary, ModelCheckpoint, TQDMProgressBar, ModelSummary)
 from pytorch_lightning.cli import LightningCLI
 from torchmetrics import MetricCollection
 from torch_ema import ExponentialMovingAverage
 from ot_vae_lightning.utils.partial_checkpoint import PartialCheckpoint
+from ot_vae_lightning.utils import Collage
+
+__all__ = ['VisionModule', 'VisionCLI']
 
 
 class VisionModule(pl.LightningModule, ABC):
@@ -80,6 +86,7 @@ class VisionModule(pl.LightningModule, ABC):
         self.inference_preprocess = inference_preprocess
         self.inference_postprocess = inference_postprocess
         self._inference_flag = False
+        self.ema_decay = ema_decay
         self._ema = None
 
     @abstractmethod
@@ -108,7 +115,7 @@ class VisionModule(pl.LightningModule, ABC):
         if self.train_metrics is not None:
             metric_result = self.train_metrics(pbatch['preds'], pbatch['target'])
             logs = {**logs, **metric_result}
-        self.log_dict(logs, sync_dist=False, rank_zero_only=True, prog_bar=True, logger=True)
+        self.log_dict(logs, rank_zero_only=True, prog_bar=True, logger=True, sync_dist=False)
         return {'loss': loss, **logs, **pbatch}
 
     def validation_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
@@ -156,8 +163,8 @@ class VisionModule(pl.LightningModule, ABC):
 
     def on_fit_start(self) -> None:
         self._set_inference_transforms()
-        if self.hparams.ema_decay is not None:
-            self._ema = ExponentialMovingAverage(self.optim_parameters(), decay=self.hparams.ema_decay)
+        if self.ema_decay is not None:
+            self._ema = ExponentialMovingAverage(self.optim_parameters(), decay=self.ema_decay)
         return self._prepare_metrics('train')
 
     def on_validation_start(self) -> None:
@@ -279,9 +286,37 @@ class VisionCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.link_arguments("data.inference_preprocess", "model.inference_preprocess", apply_on="instantiate")
         parser.link_arguments("data.inference_postprocess", "model.inference_postprocess", apply_on="instantiate")
+        parser.set_defaults({
+            "trainer.accelerator": "gpu",
+            "trainer.devices": 1,
+            "trainer.strategy": None,
+            "trainer.benchmark": True,
+            "trainer.precision": 32,
+            "trainer.max_epochs": 100,
+            "trainer.gradient_clip_val": None,
+        })
+
+        parser.add_lightning_class_args(Collage, "collage")
+        parser.set_defaults({
+            "collage.log_interval": 100,
+            "collage.num_samples": 8
+        })
+
+        parser.add_lightning_class_args(EarlyStopping, "early_stopping")
+        parser.set_defaults({
+            "early_stopping.monitor": "val/metrics/psnr",
+            "early_stopping.mode": "max",
+            "early_stopping.min_delta": 0.1,
+            "early_stopping.patience": 5,
+            "early_stopping.verbose": True
+        })
+
+        rich_installed = importlib.util.find_spec("rich") is not None
+        parser.add_lightning_class_args(RichProgressBar if rich_installed else TQDMProgressBar, "pbar")
+        parser.add_lightning_class_args(RichModelSummary if rich_installed else ModelSummary, "summary")
 
     def instantiate_trainer(self, **kwargs: Any) -> pl.Trainer:
         trainer = super().instantiate_trainer(**kwargs)
-        if isinstance(trainer.logger, WandbLogger):
-            wandb.save(self.save_config_filename)
+        # if isinstance(trainer.logger, WandbLogger):
+        #     wandb.save(self.save_config_filename)
         return trainer

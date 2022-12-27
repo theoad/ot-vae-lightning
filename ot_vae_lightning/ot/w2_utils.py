@@ -74,7 +74,7 @@ def compute_transport_operators(
     :return: Batch of transport operators T_{s -> t} and \Sigma_w
     """
     # TL;DR
-    # Sorry for the spaghetti function. Error checking is better this way than with modular calls.
+    # @theoad: Sorry for the spaghetti function. Error checking is better this way than with modular calls.
     # Parameter validation is done in this wrapper function and actual computations are done in modular calls.
 
     # ----------------------------------------- PARAMETER CHECKS + BROADCAST ----------------------------------------- #
@@ -129,6 +129,8 @@ def compute_transport_operators(
              Found {cov_source_neg.count_nonzero().item()}/{cov_source.numel()}
              {'negative' if stochastic else 'non-positive'} elements in `cov_source`.
             """)
+        if stochastic: cov_source[cov_source < STABILITY_CONST] = 0
+
         if cov_target_neg.any():
             semi = '' if stochastic else 'semi-'
             if make_pd:
@@ -145,7 +147,7 @@ def compute_transport_operators(
              Found {cov_target_neg.count_nonzero().item()}/{cov_target.numel()}
              {'non-positive' if stochastic else 'negative'} elements in `cov_target`.
             """)
-    else:
+    else:  # not diag
         if cov_source.dim() not in [2, 3] or cov_target.dim() not in [2, 3]:
             raise ValueError(f"""
             `cov_source` and `cov_target` should be 2-dim or 3-dim tensors (batch of matrices),
@@ -208,14 +210,26 @@ def compute_transport_operators(
     # ------------------------------------------- END OF PARAMETER CHECKS -------------------------------------------- #
 
     if diag:
-        if stochastic: T, Cw = _compute_transport_diag_stochastic(cov_source, cov_target, pg_star)
+        if stochastic:
+            T, Cw = _compute_transport_diag_stochastic(cov_source, cov_target, pg_star)
+            if (Cw <= 0).any():
+                warnings.warn(f"""
+                The noise covariance matrix is not positive definite. Falling back to the non-stochastic implementation
+                """)
+                T, Cw = _compute_transport_diag(cov_source, cov_target, pg_star)
         else: T, Cw = _compute_transport_diag(cov_source, cov_target, pg_star)
     else:
-        if stochastic: T, Cw = _compute_transport_full_mat_stochastic(cov_source, cov_target, pg_star)
+        if stochastic:
+            T, Cw = _compute_transport_full_mat_stochastic(cov_source, cov_target, pg_star)
+            if not is_spd(Cw, strict=True).all():
+                warnings.warn(f"""
+                The noise covariance matrix is not positive definite. Falling back to the non-stochastic implementation
+                """)
+                T, Cw = _compute_transport_full_mat(cov_source, cov_target, pg_star)
         else: T, Cw = _compute_transport_full_mat(cov_source, cov_target, pg_star)
 
     T = T.squeeze(0) if squeeze else T
-    Cw = Cw.squeeze(0) if squeeze and Cw is not None else Cw
+    Cw = Cw.squeeze(0) if squeeze and Cw is not None else None
     return T, Cw
 
 
@@ -432,7 +446,7 @@ def batch_w2_dissimilarity_gaussian_diag(
         got {mean_source.size()}, {mean_target.size()}, {var_source.size()} and {var_target.size()} 
         which are not compatible with the function implementation.
         """)
-    if mean_source.dim() < 3 or mean_target.dim() < 3 or var_source.dim() < 3 or var_target.dim():
+    if mean_source.dim() < 3 or mean_target.dim() < 3 or var_source.dim() < 3 or var_target.dim() < 3:
         raise ValueError(f"""
         All the input parameters are expected to have at least 3 dimensions,
         got {mean_source.dim()}, {mean_target.dim()}, {var_source.dim()} and {var_target.dim()} 
@@ -632,10 +646,11 @@ def _compute_transport_diag_stochastic(
     # Compute SVD pseudo-inverse of `cov_source`
     pinv_source = cov_source.clone()
     pinv_source[pinv_source > STABILITY_CONST] = 1 / pinv_source[pinv_source > STABILITY_CONST]
+    pinv_source[pinv_source <= STABILITY_CONST] = 0
 
     T = (1 - p_gstar) * torch.sqrt(cov_target * cov_source) * pinv_source + p_gstar
     var_w = sqrt(1 - p_gstar) * cov_target * (1 - cov_target * pinv_source * T_star ** 2)
-    return T, var_w + var_w.min().clamp(max=0).abs() + STABILITY_CONST
+    return T, var_w
 
 
 # ******************************************************************************************************************** #
@@ -678,4 +693,4 @@ def _compute_transport_full_mat_stochastic(
 
     T = (1-pg_star) * (sqrt_target @ sqrtm(sqrt_target @ cov_source @ sqrt_target) @ inv_sqrt_target @ pinv_source) + pg_star * Identity
     Cw = sqrt(1-pg_star) * sqrt_target @ (Identity - sqrt_target @ T_star @ pinv_source @ T_star @ sqrt_target) @ sqrt_target
-    return T, make_psd(Cw, strict=True)
+    return T, Cw

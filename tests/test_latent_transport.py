@@ -1,7 +1,7 @@
 """
 ************************************************************************************************************************
 
-`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI
+`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI of latent transport
 
 Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 
@@ -11,7 +11,6 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 
 ************************************************************************************************************************
 """
-import torch
 from torchvision.transforms.transforms import GaussianBlur
 from pytorch_lightning import Trainer, seed_everything
 from torchmetrics import MetricCollection
@@ -23,14 +22,13 @@ from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import AutoEncoder
 from ot_vae_lightning.ot import LatentTransport
 
-_PSNR_PERFORMANCE = 15
+_PSNR_PERFORMANCE = 16
 _MAX_EPOCH = 2
 
 
 transport_kwargs = dict(
     transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
     transport_type="gaussian",
-    transformed_latents_from_train=True,
     make_pd=True,
     verbose=True,
     stochastic=False,
@@ -55,7 +53,7 @@ def test_vae_latent_transport(prog_bar=False, batch_size=50):
         capacity=4,
         double_encoded_features=True,
         down_up_sample=True,
-        residual=True
+        residual="add"
     )
 
     model = VAE(
@@ -100,7 +98,7 @@ def test_vae_latent_transport(prog_bar=False, batch_size=50):
         max_epochs=_MAX_EPOCH,
         enable_progress_bar=prog_bar,
         accelerator='auto',
-        devices='auto',
+        devices=1,
         callbacks=callbacks,
         num_sanity_val_steps=0,
         logger=False

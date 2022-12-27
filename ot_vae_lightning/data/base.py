@@ -18,10 +18,12 @@ from torch import randperm
 from torch.utils.data import DataLoader, Dataset, Subset
 from itertools import accumulate
 import torchvision.transforms as T
-import pytorch_lightning as pl
+from pytorch_lightning import LightningDataModule
+
+__all__ = ['BaseDatamodule', 'dataset_split']
 
 
-class BaseDatamodule(pl.LightningDataModule, ABC):
+class BaseDatamodule(LightningDataModule, ABC):
     """
     `PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of an abstract DataModule
 
@@ -41,7 +43,6 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
                  predict_transform: Callable = T.ToTensor(),
                  inference_preprocess: Callable = lambda x: x,
                  inference_postprocess: Callable = lambda x: x,
-                 train_val_split: float = 0.9,
                  seed: Optional[int] = None,
                  train_batch_size: int = 32,
                  val_batch_size: int = 256,
@@ -58,7 +59,6 @@ class BaseDatamodule(pl.LightningDataModule, ABC):
         :param predict_transform: Transforms to apply on the `predict` images
         :param inference_preprocess: Transform to apply on raw inference data (that did not go through train_transform)
         :param inference_postprocess: used to reverse `preprocess` in inference, visualization (e.g. denormalize images)
-        :param train_val_split: Train-validation split coefficient
         :param seed: integer seed for re reproducibility
         :param train_batch_size: Training batch size
         :param val_batch_size: Validation batch size

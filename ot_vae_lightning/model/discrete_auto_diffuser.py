@@ -20,9 +20,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import ot_vae_lightning.data    # noqa: F401
+from ot_vae_lightning.model.base import VisionCLI
 from ot_vae_lightning.prior.codebook import CodebookPrior as Vocabulary
-from ot_vae_lightning.model.vae import VAE, VaeCLI
-from ot_vae_lightning.data import TorchvisionDatamodule
+from ot_vae_lightning.model.vae import VAE
+from ot_vae_lightning.data.torchvision_datamodule import TorchvisionDatamodule
+import ot_vae_lightning.utils as utils
+
+__all__ = ['DAD', 'DadCLI']
 
 
 class DAD(VAE):
@@ -93,11 +97,11 @@ class DAD(VAE):
         self.autoregressive_decoder.eval()
 
         latents = self.vocabulary.values(embed_ind)
-        # latents = utils.unflatten_and_unpermute(latents, self.latent_size, self.vocabulary.embed_dims)
+        latents = utils.unflatten_and_unpermute(latents, self.latent_size, self.vocabulary.embed_dims)
         return self.decode(latents, **kwargs, no_postprocess_override=True)
 
 
-class DadCLI(VaeCLI):
+class DadCLI(VisionCLI):
     def add_arguments_to_parser(self, parser):
         super().add_arguments_to_parser(parser)
         parser.link_arguments(

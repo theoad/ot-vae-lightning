@@ -1,7 +1,7 @@
 """
 ************************************************************************************************************************
 
-`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI fot ViT VAE
+`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI for ViT VAE
 
 Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 
@@ -23,13 +23,22 @@ from ot_vae_lightning.prior import ConditionalGaussianPrior
 from ot_vae_lightning.data import CIFAR10
 from ot_vae_lightning.networks import ViT
 from ot_vae_lightning.ot import LatentTransport
-from tests.test_latent_transport import transport_kwargs
-from ot_vae_lightning.data import ProgressiveTransform, PgTransform
+from ot_vae_lightning.data.progressive_callback import ProgressiveTransform, PgTransform
 
-_PSNR_PERFORMANCE = 16
-_TRANSPORT_PERFORMANCE = 16
+_PSNR_PERFORMANCE = 18
+_TRANSPORT_PERFORMANCE = 18
 _MAX_EPOCH = 2
 _DIM = 128
+
+transport_kwargs = dict(
+    transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
+    transport_type="gaussian",
+    make_pd=True,
+    verbose=True,
+    stochastic=False,
+    pg_star=0,
+    persistent=True
+)
 
 
 def test_vae_vit_training(prog_bar=False, batch_size=50):
@@ -94,7 +103,7 @@ def test_vae_vit_training(prog_bar=False, batch_size=50):
         ),
         LatentTransport(
             size=model.latent_size,
-            transport_dims=(1,),
+            transport_dims=(2,),
             diag=False,
             logging_prefix="embed_token",
             **transport_kwargs
@@ -106,7 +115,7 @@ def test_vae_vit_training(prog_bar=False, batch_size=50):
         max_epochs=_MAX_EPOCH,
         enable_progress_bar=prog_bar,
         accelerator='auto',
-        devices='auto',
+        devices=1,
         callbacks=callbacks,
         num_sanity_val_steps=0,
         logger=False

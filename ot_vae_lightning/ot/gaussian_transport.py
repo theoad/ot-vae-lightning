@@ -11,12 +11,17 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
+import numpy as np
 from typing import Optional
 import torch
 from torch import Tensor
 from torchmetrics import Metric
+from torch.distributions import MultivariateNormal, Normal
 
 from ot_vae_lightning.ot.w2_utils import w2_gaussian, compute_transport_operators, apply_transport
+from ot_vae_lightning.ot.matrix_utils import make_psd, STABILITY_CONST
+
+__all__ = ['GaussianTransport']
 
 
 class GaussianTransport(Metric):
@@ -59,7 +64,7 @@ class GaussianTransport(Metric):
         :param persistent: whether the buffers are part of this module's :attr:`state_dict`.
         :param make_pd: Add the minimum eigenvalue in order to make matrices pd, if needed
         """
-        super().__init__(dist_sync_on_step=False, full_state_update=False)
+        super().__init__(dist_sync_on_step=False)
         self.dim = dim
         self.diag = diag
         self.pg_star = pg_star
@@ -98,7 +103,7 @@ class GaussianTransport(Metric):
             self.mean_target += flattened.sum(0)
             self.cov_target += (flattened ** 2).sum(0) if self.diag else flattened.T.mm(flattened)
 
-    def compute(self) -> Tensor:
+    def _compute_helper(self) -> Tensor:
         self.mean_source /= self.n_obs_source
         self.mean_target /= self.n_obs_target
         self.cov_source /= self.n_obs_source
@@ -120,7 +125,7 @@ class GaussianTransport(Metric):
             verbose=self.verbose
         )
 
-        transport_operator, cov_noise = compute_transport_operators(
+        self.transport_operator, self.cov_stochastic_noise = compute_transport_operators(
             self.cov_source,
             self.cov_target,
             stochastic=self.stochastic,
@@ -129,11 +134,10 @@ class GaussianTransport(Metric):
             make_pd=self.make_pd,
             verbose=self.verbose
         )
-
-        self.transport_operator.data = transport_operator
-        if self.cov_stochastic_noise is not None and cov_noise is not None:
-            self.cov_stochastic_noise.data = cov_noise
         return w2
+
+    def compute(self) -> Tensor:
+        return self._compute_helper()
 
     def transport(self, inputs: Tensor) -> Tensor:
         flattened = inputs.flatten(1).double()
@@ -150,3 +154,14 @@ class GaussianTransport(Metric):
         )
 
         return transported.to(dtype=inputs.dtype).unflatten(1, inputs.shape[1:])
+
+    def sample(self, shape, dtype, device, from_dist='source') -> Tensor:
+        if np.prod(shape[1:]) != self.dim:
+            ValueError(f"`shape` is expected to have dimensionality equaled to {self.dim}")
+
+        mean, cov = getattr(self, f'mean_{from_dist}'), getattr(self, f'cov_{from_dist}')
+        if self.make_pd:
+            cov = torch.clamp(cov, min=STABILITY_CONST) if self.diag else make_psd(cov, strict=True)
+        dist = Normal(mean, scale=cov ** 0.5) if self.diag else MultivariateNormal(mean, covariance_matrix=cov)
+        samples = dist.sample((shape[0],)).unflatten(1, shape[1:]).to(dtype=dtype, device=device)
+        return samples

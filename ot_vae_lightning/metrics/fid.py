@@ -20,9 +20,10 @@ import torch
 from torch import Tensor
 from collections import OrderedDict
 from torchmetrics.metric import Metric
-from torchmetrics.utilities import rank_zero_info
 from torchmetrics.image.fid import NoTrainInceptionV3, _compute_fid
 from ot_vae_lightning.ot.w2_utils import mean_cov
+
+__all__ = ['FrechetInceptionDistance']
 
 
 class NoTrainInceptionV3NoStateDict(NoTrainInceptionV3):
@@ -94,16 +95,6 @@ class FrechetInceptionDistance(Metric):
                        dist_reduce_fx="sum")
         self.add_state("num_real_obs", torch.zeros(1).long(), dist_reduce_fx="sum")
         self.add_state("num_fake_obs", torch.zeros(1).long(), dist_reduce_fx="sum")
-        # self.real_mean, self.real_cov = None, None
-        # self.real_prepared = False
-        rank_zero_info('FID prepared successfully')
-
-    # def _compute_real_statistics(self) -> None:
-    #     if self.real_prepared: return
-    #     self.real_mean, self.real_cov = compute_mean_cov(self.real_sum, self.real_correlation, self.num_real_obs)
-    #     self._persistent['real_mean'] = True
-    #     self._persistent['real_cov'] = True
-    #     self.real_prepared = True
 
     def _extract_features(self, img: Tensor) -> Tuple[Tensor, Tensor]:
         if img.size(1) == 1: img = torch.cat([img, img, img], dim=1)
@@ -112,16 +103,6 @@ class FrechetInceptionDistance(Metric):
         sum_features = features.sum(dim=0)
         correlation = features.T @ features
         return sum_features, correlation
-
-    # @rank_zero_only
-    # @torch.no_grad()
-    # def prepare_metric(self, pl_module: LightningModule) -> None:
-    #     self.reset()
-    #     dataloader = pl_module.trainer.datamodule.train_dataloader()
-    #     for idx, (img, label) in enumerate(dataloader):
-    #         self.update(target=img.to(pl_module.device))
-    #     self._compute_real_statistics()
-    #     rank_zero_info('FID prepared successfully')
 
     def update(self, generated: Optional[Tensor] = None, samples: Optional[Tensor] = None) -> None:  # type: ignore
         """ Update the state with extracted features

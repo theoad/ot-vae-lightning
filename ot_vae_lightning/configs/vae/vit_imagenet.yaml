@@ -1,0 +1,30 @@
+trainer:
+  logger:
+    class_path: pytorch_lightning.loggers.WandbLogger
+    init_args:
+      project: ot-vae-lightning
+      entity: gip
+      dir: vae
+      log_model: true
+      name: pretrained-vit-ae
+model:
+  autoencoder: null
+  encoder:
+    class_path: ot_vae_lightning.networks.inv_vit.FreezedViT
+    init_args:
+      torch_hub_url: https://dl.fbaipublicfiles.com/dino/dino_deitsmall16_pretrain/dino_deitsmall16_pretrain.pth
+      patch_size: 16
+      embed_dim: 384
+      depth: 12
+      num_heads: 6
+      mlp_ratio: 4
+      qkv_bias: true
+  decoder:
+    class_path: ot_vae_lightning.networks.inv_vit.InverseViT
+    init_args:
+      patch_size: 16
+      embed_dim: 384
+      depth: 12
+      num_heads: 6
+      mlp_ratio: 4
+      qkv_bias: true

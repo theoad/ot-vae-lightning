@@ -18,10 +18,13 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.types import _size
-from ot_vae_lightning.prior import GaussianPrior, Prior
+from ot_vae_lightning.prior.base import Prior
+from ot_vae_lightning.prior.gaussian import GaussianPrior
 from numpy import prod
 from torch.distributions import Distribution, Normal
 import ot_vae_lightning.utils as utils
+
+__all__ = ['ConditionalGaussianPrior']
 
 
 class ConditionalGaussianPrior(GaussianPrior):

@@ -10,9 +10,11 @@ from torch import Tensor
 from torch.distributions import Categorical
 from torch.types import _size
 
-from ot_vae_lightning.prior import Prior
+from ot_vae_lightning.prior.base import Prior
 import ot_vae_lightning.utils as utils
 from copy import deepcopy
+
+__all__ = ['CodebookPrior']
 
 
 class CodebookPrior(Prior):

@@ -1,3 +1,4 @@
-from ot_vae_lightning.prior.base import Prior
-from ot_vae_lightning.prior.gaussian import GaussianPrior
-from ot_vae_lightning.prior.conditional_gaussian import ConditionalGaussianPrior
+from ot_vae_lightning.prior.base import *
+from ot_vae_lightning.prior.gaussian import *
+from ot_vae_lightning.prior.conditional_gaussian import *
+from ot_vae_lightning.prior.codebook import *

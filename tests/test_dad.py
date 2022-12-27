@@ -1,7 +1,7 @@
 """
 ************************************************************************************************************************
 
-`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI fot Discrete Auto Diffusion (DAD)
+`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI for Discrete Auto Diffusion (DAD)
 
 Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 
@@ -113,7 +113,7 @@ def test_dad(prog_bar=False, batch_size=32):
         max_epochs=_MAX_EPOCH,
         enable_progress_bar=prog_bar,
         accelerator='auto',
-        devices='auto',
+        devices=1,
         logger=False,
     )
 

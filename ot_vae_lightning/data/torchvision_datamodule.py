@@ -15,11 +15,12 @@ from typing import Optional, Union, Tuple
 from enum import Enum
 
 import torch
-from ot_vae_lightning.data import BaseDatamodule, dataset_split
+from ot_vae_lightning.data.base import BaseDatamodule, dataset_split
 import torchvision.transforms as T
 import torchvision.datasets as datasets
 import inspect
 
+__all__ = ['TorchvisionDatamodule']
 
 TvDataset = Enum('TvDataset', datasets.__all__)
 
@@ -50,7 +51,7 @@ class TorchvisionDatamodule(BaseDatamodule):
                  predict_transform: callable = T.ToTensor(),
                  inference_preprocess: callable = torch.nn.Identity(),
                  inference_postprocess: callable = torch.nn.Identity(),
-                 train_val_split: float = 0.9,
+                 test_val_split: float = 0.9,
                  seed: Optional[int] = None,
                  train_batch_size: int = 32,
                  val_batch_size: int = 32,
@@ -70,7 +71,7 @@ class TorchvisionDatamodule(BaseDatamodule):
         :param predict_transform: Transforms to apply on the `predict` images
         :param inference_preprocess: Transform to apply on raw inference data (that did not go through train_transform)
         :param inference_postprocess: used to reverse `preprocess` in inference, visualization (e.g. denormalize images)
-        :param train_val_split: Train-validation split coefficient
+        :param test_val_split: Test-validation split coefficient
         :param seed: integer seed for re reproducibility
         :param train_batch_size: Training batch size
         :param val_batch_size: Validation batch size
@@ -78,7 +79,7 @@ class TorchvisionDatamodule(BaseDatamodule):
         :param predict_batch_size: Predict batch size
         """
         super().__init__(num_workers, train_transform, val_transform, test_transform, predict_transform,
-                         inference_preprocess, inference_postprocess, train_val_split, seed, train_batch_size,
+                         inference_preprocess, inference_postprocess, seed, train_batch_size,
                          val_batch_size, test_batch_size, predict_batch_size)
         self.dataset_cls = getattr(datasets, dataset_name)
 
@@ -106,26 +107,16 @@ class TorchvisionDatamodule(BaseDatamodule):
             **self._train_kwarg
         )
 
-        self.val_dataset = self.dataset_cls(
-            self.hparams.root[0] if isinstance(self.hparams.root, tuple) else self.hparams.root,
+        self.val_dataset = self.test_dataset = self.dataset_cls(
+            self.hparams.root[1] if isinstance(self.hparams.root, tuple) else self.hparams.root,
             transform=self.val_transform,
-            **self._train_kwarg
+            **self._test_kwarg
         )
 
-        self.train_dataset, self.val_dataset = dataset_split(
-            datasets=[self.train_dataset, self.val_dataset],
-            split=self.hparams.train_val_split,
+        self.val_dataset, self.test_dataset = dataset_split(
+            datasets=[self.val_dataset, self.test_dataset],
+            split=self.hparams.test_val_split,
             seed=self.hparams.seed
         )
 
-        self.test_dataset = self.dataset_cls(
-            self.hparams.root[1] if isinstance(self.hparams.root, tuple) else self.hparams.root,
-            transform=self.test_transform,
-            **self._test_kwarg
-        )
-
-        self.predict_dataset = self.dataset_cls(
-            self.hparams.root[1] if isinstance(self.hparams.root, tuple) else self.hparams.root,
-            transform=self.predict_transform,
-            **self._test_kwarg
-        )
+        self.predict_dataset = None

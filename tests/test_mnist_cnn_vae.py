@@ -37,7 +37,7 @@ def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
         max_epochs=_MAX_EPOCH,
         enable_progress_bar=prog_bar,
         accelerator='auto',
-        devices='auto',
+        devices=1,
         num_sanity_val_steps=0
     )
     datamodule = MNIST32(
@@ -56,7 +56,7 @@ def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
         latent_resolution,
         capacity=8,
         down_sample=True,
-        residual=True
+        residual="add"
     )
 
     decoder = CNN(  # Simple nn.Module
@@ -66,7 +66,7 @@ def test_vae_encoder_decoder_training(prog_bar=False, batch_size=50):
         in_resolution,
         capacity=8,
         up_sample=True,
-        residual=True
+        residual="add"
     )
 
     metrics = MetricCollection({
@@ -104,7 +104,7 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
         max_epochs=_MAX_EPOCH,
         enable_progress_bar=prog_bar,
         accelerator='auto',
-        devices='auto',
+        devices=1,
         num_sanity_val_steps=0
     )
     datamodule = MNIST32(
@@ -124,7 +124,7 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
         capacity=8,
         double_encoded_features=True,
         down_up_sample=True,
-        residual=True
+        residual="add"
     )
 
     model = VAE(
@@ -167,7 +167,7 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
         latent_resolution,
         capacity=8,
         down_sample=True,
-        residual=True
+        residual="add"
     )
 
     decoder = CNN(  # Simple nn.Module
@@ -177,7 +177,7 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
         in_resolution,
         capacity=8,
         up_sample=True,
-        residual=True
+        residual="add"
     )
 
     vae = VAE(
@@ -201,7 +201,7 @@ def inference(ckpt_path, prog_bar=False, batch_size=50):
         max_epochs=_MAX_EPOCH,
         enable_progress_bar=prog_bar,
         accelerator='auto',
-        devices='auto',
+        devices=1,
         num_sanity_val_steps=0
     )
 

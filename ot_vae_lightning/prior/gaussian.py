@@ -15,9 +15,11 @@ from typing import Tuple, Optional
 import torch
 from torch import Tensor
 from torch.types import _size
-from ot_vae_lightning.prior import Prior
+from ot_vae_lightning.prior.base import Prior
 from torch.distributions import Distribution, Normal
 from ot_vae_lightning.utils import unsqueeze_like
+
+__all__ = ['GaussianPrior']
 
 
 class GaussianPrior(Prior):
@@ -62,10 +64,10 @@ class GaussianPrior(Prior):
     def closed_form_reverse_kl(p: Distribution, q: Distribution) -> Tensor:
         """KL(q, p), assuming q and p are Normally distributed"""
         dims = list(range(1, q.mean.dim()))
-        return 0.5 * torch.sum(
+        return torch.sum(0.5 * (
             (q.mean - p.mean) ** 2 / p.variance +
             p.variance.log() - q.variance.log() +
-            q.variance / p.variance - 1, dim=dims
+            q.variance / p.variance - 1), dim=dims
         )
 
     def reparametrization(self, z: Tensor, temperature: Optional[Tensor] = None) -> Distribution:
@@ -90,7 +92,7 @@ class GaussianPrior(Prior):
         p = self.reparametrization(torch.zeros_like(x))
         z = q.rsample()
         loss = self.empirical_reverse_kl(p, q, z) if self.empirical_kl else self.closed_form_reverse_kl(p, q)
-        return x, loss
+        return z, loss
 
     def sample(self, shape: _size, device: torch.device) -> Tensor:   # noqa arguments-differ
         return torch.randn(*shape, device=device)

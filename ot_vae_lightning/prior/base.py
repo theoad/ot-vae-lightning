@@ -20,6 +20,8 @@ from torch.types import _size
 import torch.nn as nn
 from torch.distributions import Distribution
 
+__all__ = ['Prior']
+
 
 class Prior(nn.Module, ABC):
     """

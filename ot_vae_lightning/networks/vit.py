@@ -21,7 +21,9 @@ from torch import Tensor
 import torch.nn as nn
 from einops.layers.torch import Rearrange
 from einops import repeat
-from ot_vae_lightning.networks.utils import GaussianFourierProjection
+from ot_vae_lightning.networks.nets_utils import GaussianFourierProjection
+
+__all__ = ['PositionalEmbedding', 'ViT', 'AutoRegressive']
 
 
 def pair(t):

@@ -94,7 +94,7 @@ def min_eig(matrices: Tensor) -> Tensor:
     Returns the minimal eigen values of a batch of matrices (signed).
 
     :param matrices: Batch of matrices with shape [*, D, D] where * is zero or leading batch dimensions
-    :return: Tensor T with shape [*]. with T[i] = min(eig(matrices[i])
+    :return: Tensor T with shape [*]. with T[i] = min(eig(matrices[i]))
     """
     return torch.min(torch.linalg.eigh(matrices)[0], dim=-1)[0]
 
@@ -130,7 +130,7 @@ def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = F
     :param return_correction: If ``True``, returns the correction added to the diagonal of the matrices.
     :return: Tensor T with shape [*]. with T[i] = matrices[i] + min(eig(matrices[i]) * I
     """
-    small_val = torch.abs(min_eig(matrices).clamp(max=0))
+    small_val = torch.abs(min_eig(matrices).clamp(max=0)).unsqueeze(-1).unsqueeze(-1)
     if strict:
         small_val += STABILITY_CONST
     res = matrices + small_val * eye_like(matrices)

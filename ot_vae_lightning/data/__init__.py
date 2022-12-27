@@ -1,8 +1,7 @@
 import torchvision.transforms as T
-from ot_vae_lightning.data.base import BaseDatamodule, dataset_split
-from ot_vae_lightning.data.torchvision_datamodule import TorchvisionDatamodule
+from ot_vae_lightning.data.base import *
+from ot_vae_lightning.data.torchvision_datamodule import *
 from ot_vae_lightning.utils import UnNormalize, ToTensor
-from ot_vae_lightning.data.progressive_callback import ProgressiveTransform, PgTransform, PgCompose, NOOP
 
 
 class MNIST(TorchvisionDatamodule):
@@ -96,7 +95,7 @@ class ImageNet224(TorchvisionDatamodule):
     _mean, _std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
     _normalize = T.Normalize(_mean, _std)
     _denormalize = UnNormalize(_mean, _std)
-    _resize = [T.Resize(224), ToTensor()]
+    _resize = [T.CenterCrop(IMG_SIZE), T.Resize(IMG_SIZE), ToTensor()]
 
     def __init__(self, *args, **kwargs):
         super().__init__(

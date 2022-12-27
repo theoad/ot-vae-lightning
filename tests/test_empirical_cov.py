@@ -1,3 +1,16 @@
+"""
+************************************************************************************************************************
+
+`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI for empirical covariance computation
+
+Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
+
+.. warning:: Work in progress. This implementation is still being verified.
+
+.. _TheoA: https://github.com/theoad
+
+************************************************************************************************************************
+"""
 from math import sqrt
 import torch
 from ot_vae_lightning.ot.matrix_utils import is_spd, STABILITY_CONST
