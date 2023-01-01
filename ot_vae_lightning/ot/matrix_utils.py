@@ -1,3 +1,16 @@
+"""
+************************************************************************************************************************
+
+`PyTorch <https://pytorch.org/>`_ implementation of matrix utilities
+
+Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
+
+.. warning:: Work in progress. This implementation is still being verified.
+
+.. _TheoA: https://github.com/theoad
+
+************************************************************************************************************************
+"""
 from typing import Union, Tuple
 
 import torch
@@ -6,8 +19,6 @@ from torch import Tensor, BoolTensor
 __all__ = [
     'eye_like',
     'sqrtm',
-    'logm',
-    'expm',
     'invsqrtm',
     'is_spd',
     'is_pd',
@@ -50,22 +61,7 @@ def sqrtm(matrices: Tensor) -> Tensor:
     :returns: batch containing mat. square root of each matrix
     """
     return _matrix_operator(matrices, torch.sqrt)
-
-
-def logm(matrices: Tensor) -> Tensor:
-    """
-    :param matrices: batch of SPD matrices
-    :returns: batch containing mat. log of each matrix
-    """
-    return _matrix_operator(matrices, torch.log)
-
-
-def expm(matrices: Tensor) -> Tensor:
-    """"
-    :param matrices: batch of SPSD matrices
-    :returns: batch containing mat. exp of each matrix
-    """
-    return _matrix_operator(matrices, torch.exp)
+    # return torch.linalg.cholesky(matrices)
 
 
 def invsqrtm(matrices: Tensor) -> Tensor:
@@ -75,6 +71,8 @@ def invsqrtm(matrices: Tensor) -> Tensor:
     """
     isqrt = lambda x: 1. / torch.sqrt(x)
     return _matrix_operator(matrices, isqrt)
+    # M = torch.linalg.cholesky(matrices)
+    # return torch.linalg.solve_triangular(M, eye_like(M), upper=False)
 
 
 def is_symmetric(matrices: Tensor) -> BoolTensor:
@@ -86,7 +84,7 @@ def is_symmetric(matrices: Tensor) -> BoolTensor:
     """
     if matrices.size(-1) != matrices.size(-2):
         return torch.full_like(matrices.mean(dim=(-1, -2)), 0).bool()  # = Tensor([False, False, ..., False])
-    return torch.sum((matrices - matrices.transpose(-2, -1))**2, dim=(-1, -2)) < STABILITY_CONST
+    return torch.sum((matrices - matrices.transpose(-2, -1))**2, dim=(-1, -2)) < STABILITY_CONST  # noqa
 
 
 def min_eig(matrices: Tensor) -> Tensor:
@@ -139,15 +137,17 @@ def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = F
     return res
 
 
-def mean_cov(sum: Tensor, sum_corr: Tensor, num_obs: Union[Tensor, int]) -> Tuple[Tensor, Tensor]:
+def mean_cov(sum: Tensor, sum_corr: Tensor, num_obs: Union[Tensor, int], diag: bool = False) -> Tuple[Tensor, Tensor]:
     """
     Empirical computation of mean and covariance matrix
 
     :param sum: Sum of feature vectors of shape [*, D]
-    :param sum_corr: Sum of covariance matrices of shape [*, D, D]
+    :param sum_corr: Sum of covariance matrices of shape [*, D, D] ([*, D] if `diag`==True)
     :param num_obs: Number of observations
-    :return: The features mean and covariance of shape [*, D] and [*, D, D]
+    :param diag: If ``True``, will expect the covariance to be a vector of variance
+    :return: The features mean and covariance of shape [*, D] and [*, D, D] ([*, D] if `diag`==True)
     """
     mean = sum / num_obs
-    cov = sum_corr / num_obs - mean.unsqueeze(-1) @ mean.unsqueeze(-2)
+    cov = sum_corr / num_obs
+    cov -= mean ** 2 if diag else mean.unsqueeze(-1) @ mean.unsqueeze(-2)
     return mean, cov

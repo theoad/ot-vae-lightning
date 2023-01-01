@@ -1,3 +1,4 @@
+import re
 import inspect
 from copy import copy
 
@@ -267,3 +268,13 @@ def unsqueeze_like(tensor: torch.Tensor, like: torch.Tensor):
         return tensor
     else:
         return tensor[(...,) + (None,) * n_unsqueezes]
+
+
+def camel2snake(name):
+    return name[0].lower() + re.sub(r'(?!^)[A-Z]', lambda x: '_' + x.group(0).lower(), name[1:])
+
+
+def removesuffix(string, suffix):
+    if string.lower().endswith(suffix.lower()):
+        return string[:-len(suffix)]
+    return string

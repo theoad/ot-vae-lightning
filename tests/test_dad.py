@@ -22,12 +22,12 @@ from ot_vae_lightning.prior.codebook import CodebookPrior as Vocabulary
 from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.networks import ViT
 
-_PSNR_PERFORMANCE = 13      # TODO: make this higher
+_PSNR_PERFORMANCE = 17      # TODO: make this higher
 _MAX_EPOCH = 2
 _DIM = 64
 
 
-def test_dad(prog_bar=False, batch_size=32):
+def test_dad(prog_bar=False, batch_size=50):
     seed_everything(42)
 
     datamodule = MNIST(
@@ -101,9 +101,7 @@ def test_dad(prog_bar=False, batch_size=32):
         decoder=decoder,                              # p(x    | z1)
         autoregressive_decoder=autoregressive,        # p(zt-1 | zt)
         vocabulary=vocab,
-        ce_coeff=1e-3,
         prior_kwargs=vocab_config,
-        learning_rate=1e-3
     )
 
     assert model.latent_size == torch.Size([(28 // 7) ** 2, vit_tiny_cfg['dim']])

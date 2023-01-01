@@ -11,7 +11,7 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 
 ************************************************************************************************************************
 """
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, Literal
 from abc import ABC, abstractmethod
 import importlib.util
 import functools
@@ -22,7 +22,8 @@ import wandb
 import pytorch_lightning as pl
 from pytorch_lightning.loggers.wandb import WandbLogger
 from pytorch_lightning.callbacks import (
-    EarlyStopping, RichProgressBar, RichModelSummary, ModelCheckpoint, TQDMProgressBar, ModelSummary)
+    EarlyStopping, ModelCheckpoint, RichProgressBar, RichModelSummary, TQDMProgressBar, ModelSummary
+)
 from pytorch_lightning.cli import LightningCLI
 from torchmetrics import MetricCollection
 from torch_ema import ExponentialMovingAverage
@@ -44,7 +45,9 @@ class VisionModule(pl.LightningModule, ABC):
     """
     def __init__(
             self,
-            metrics: Optional[MetricCollection] = None,
+            metrics: MetricCollection,
+            monitor: str = "accuracy",
+            mode: Literal['min', 'max'] = "min",
             checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
             metric_on_train: bool = False,
             inference_preprocess: Optional[Callable] = None,
@@ -68,11 +71,16 @@ class VisionModule(pl.LightningModule, ABC):
         ----------------------------------------------------------------------------------------------------------------
 
         :param metrics: Metrics (torchmetrics.MetricCollection) to use for train, validation and test
+        :param monitor: The name of the metric to monitor for early stopping and checkpoint saving (should be a key in `metrics`)
+        :param mode: Indicates whether the monitored metric should be minized or maximized
         :param checkpoints: Dictionary of: [attribute <-> Partial checkpoint]
                             (e.g. {'encoder': PartialCheckpoint('my_encoder_checkpoint', replace_str='encoder')})
         :param metric_on_train: If ``True``, will duplicate the validation/test metrics and use the synchronized
                                 per-step metric computation feature of torchmetrics
                                 (TL;DR: call `forward` on self.train_metrics).
+        :param inference_preprocess: Transform to apply on raw inference data (that did not go through train_transform)
+        :param inference_postprocess: used to reverse `preprocess` in inference, visualization (e.g. denormalize images)
+        :param ema_decay: If set, will use as decay parameter for exponential moving averaging the model weights
         """
         super().__init__()
         self.checkpoints = checkpoints
@@ -82,6 +90,8 @@ class VisionModule(pl.LightningModule, ABC):
         self.val_metrics = metrics.clone(prefix='val/metrics/') if metrics is not None else None
         self.test_metrics = metrics.clone(prefix='test/metrics/') if metrics is not None else None
         self.train_metrics = metrics.clone(prefix='train/metrics/') if metrics is not None and metric_on_train else None
+        self.monitor = self.val_metrics.prefix + monitor
+        self.mode = mode
 
         self.inference_preprocess = inference_preprocess
         self.inference_postprocess = inference_postprocess
@@ -284,8 +294,10 @@ class VisionModule(pl.LightningModule, ABC):
 
 class VisionCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
+        super().add_arguments_to_parser(parser)
         parser.link_arguments("data.inference_preprocess", "model.inference_preprocess", apply_on="instantiate")
         parser.link_arguments("data.inference_postprocess", "model.inference_postprocess", apply_on="instantiate")
+
         parser.set_defaults({
             "trainer.accelerator": "gpu",
             "trainer.devices": 1,
@@ -304,16 +316,34 @@ class VisionCLI(LightningCLI):
 
         parser.add_lightning_class_args(EarlyStopping, "early_stopping")
         parser.set_defaults({
-            "early_stopping.monitor": "val/metrics/psnr",
-            "early_stopping.mode": "max",
+            "early_stopping.monitor": None,
+            "early_stopping.mode": None,
             "early_stopping.min_delta": 0.1,
             "early_stopping.patience": 5,
-            "early_stopping.verbose": True
+            "early_stopping.verbose": True,
+            "early_stopping.log_rank_zero_only": True
         })
 
-        rich_installed = importlib.util.find_spec("rich") is not None
-        parser.add_lightning_class_args(RichProgressBar if rich_installed else TQDMProgressBar, "pbar")
-        parser.add_lightning_class_args(RichModelSummary if rich_installed else ModelSummary, "summary")
+        parser.add_lightning_class_args(ModelCheckpoint, "checkpointing")
+        parser.set_defaults({
+            "checkpointing.save_top_k": 10,
+            "checkpointing.monitor": None,
+            "checkpointing.mode": None,
+            "checkpointing.filename": None,
+        })
+
+        parser.link_arguments("model.monitor", "early_stopping.monitor", apply_on="instantiate")
+        parser.link_arguments("model.monitor", "checkpointing.monitor",  apply_on="instantiate")
+        parser.link_arguments("model.mode", "early_stopping.mode", apply_on="instantiate")
+        parser.link_arguments("model.mode", "checkpointing.mode",  apply_on="instantiate")
+        parser.link_arguments(
+            "trainer.logger.init_args.name", "checkpointing.filename",
+            compute_fn=lambda name: name + "-{epoch:02d}-{val_loss:.2f}",
+        )
+
+        # rich_installed = importlib.util.find_spec("rich") is not None
+        # parser.add_lightning_class_args(RichProgressBar if rich_installed else TQDMProgressBar, "pbar")
+        # parser.add_lightning_class_args(RichModelSummary if rich_installed else ModelSummary, "summary")
 
     def instantiate_trainer(self, **kwargs: Any) -> pl.Trainer:
         trainer = super().instantiate_trainer(**kwargs)

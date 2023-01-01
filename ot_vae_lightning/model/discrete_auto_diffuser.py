@@ -97,7 +97,9 @@ class DAD(VAE):
         self.autoregressive_decoder.eval()
 
         latents = self.vocabulary.values(embed_ind)
-        latents = utils.unflatten_and_unpermute(latents, self.latent_size, self.vocabulary.embed_dims)
+
+        # TODO: Why this does not work ?
+        # latents = utils.unflatten_and_unpermute(latents, self.latent_size, self.vocabulary.embed_dims)
         return self.decode(latents, **kwargs, no_postprocess_override=True)
 
 

@@ -24,6 +24,7 @@ from ot_vae_lightning.data import CIFAR10
 from ot_vae_lightning.networks import ViT
 from ot_vae_lightning.ot import LatentTransport
 from ot_vae_lightning.data.progressive_callback import ProgressiveTransform, PgTransform
+from ot_vae_lightning.ot.transport import GaussianTransport
 
 _PSNR_PERFORMANCE = 18
 _TRANSPORT_PERFORMANCE = 18
@@ -32,7 +33,7 @@ _DIM = 128
 
 transport_kwargs = dict(
     transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
-    transport_type="gaussian",
+    transport_operator=GaussianTransport,
     make_pd=True,
     verbose=True,
     stochastic=False,

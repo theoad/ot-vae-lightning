@@ -11,12 +11,12 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-import warnings
-from typing import Optional, Any, Tuple, Dict, List
+from typing import Optional, Any, Tuple, Dict, List, Type
 from itertools import accumulate
 from functools import partial
 from operator import mul
 
+import pytorch_lightning.utilities
 from numpy.random import permutation
 
 import torch
@@ -28,7 +28,7 @@ from pytorch_lightning.utilities.types import STEP_OUTPUT
 from pytorch_lightning.utilities import rank_zero_warn, move_data_to_device
 from pytorch_lightning import Callback
 
-from ot_vae_lightning.ot.gaussian_transport import GaussianTransport
+from ot_vae_lightning.ot.transport import TransportOperator, GaussianTransport
 import ot_vae_lightning.utils as utils
 
 __all__ = ['LatentTransport', 'ConditionalLatentTransport']
@@ -48,23 +48,14 @@ class LatentTransport(Callback):
 
     .. _TheoA: https://github.com/theoad
     """
-    _CLS_TABLE = {
-        "gaussian": GaussianTransport
-    }
-
-    TRANSPORT_CHOICE = _CLS_TABLE.keys()
 
     def __init__(
             self,
             size: _size,
             transformations: callable,
-            transport_type: str = "gaussian",
+            transport_operator: Type[TransportOperator] = GaussianTransport,
             transport_dims: _size = (1, 2, 3),
-            diag: bool = False,
             common_operator: bool = False,
-            pg_star: float = 0.,
-            stochastic: bool = False,
-            persistent: bool = True,
             samples_key: str = 'samples',
             latents_key: str = 'latents',
             logging_prefix: Optional[str] = None,
@@ -72,23 +63,19 @@ class LatentTransport(Callback):
             source_latents_from_train: bool = False,
             unpaired: bool = True,
             num_samples_to_log: int = 8,
-            make_pd: bool = False,
             verbose: bool = False,
             class_idx: Optional[int] = None,
-            conditional_key: str = 'y'
+            conditional_key: str = 'y',
+            **transport_operator_kwargs,
     ) -> None:
         r"""
         :param size: The size of the Tensors to transport
         :param transformations: The transformations on which the transport will be tested.
-        :param transport_type: The transport operator type. Choices are `LatentTransport.TRANSPORT_CHOICE`.
+        :param transport_operator: The transport operator type.
         :param transport_dims: The dimension on which to apply the transport. Examples
          If (1, 2, 3), will transport the input vectors as a whole.
          If (1,), will transport each needle (pixel) individually.
          if (2, 3), will transport each channel individually.
-        :param diag: If ``True`` will suppose the samples come from isotropic distributions (with diagonal covariance)
-        :param pg_star: Perception-distortion ratio. Must be a float in [0, 1] can be seen as inverse temperature.
-        :param stochastic: If ``True`` will add stochasticity to the output (if applicable).
-        :param persistent: whether the state buffers (transport operators) should be saved when checkpointing.
         :param samples_key: The key in which are stored the image samples on which to test the transport, in the
          dictionary returned from the `training_step` of the pytorch-lightning module jointly trained with this callback
         :param latents_key: The key in which are stored the latent representation of the image samples on which to test
@@ -100,14 +87,8 @@ class LatentTransport(Callback):
          transport experiment (as source and target samples will not come from unpaired distributions)
         :param num_samples_to_log: Number of image samples to log.
         :param verbose: If ``True``, warns about correction value added to the diagonal of the matrices
-        :param make_pd: If ``True``, corrects matrices needed to be PD or PSD by adding their minimum eigenvalue to
-                        their diagonal.
         """
         super().__init__()
-        if transport_type not in LatentTransport.TRANSPORT_CHOICE:
-            raise NotImplementedError(f"""
-            `transport_type` {transport_type} not supported. Choose one of {LatentTransport.TRANSPORT_CHOICE}
-            """)
         all_dims = list(range(1, len(size) + 1))
         if not set(transport_dims).issubset(all_dims):
             raise ValueError(f"""
@@ -139,9 +120,9 @@ class LatentTransport(Callback):
 
         self.samples_key = samples_key
         self.latents_key = latents_key
+        transport_type = utils.removesuffix(utils.camel2snake(transport_operator.__name__), '_transport')
         self.logging_prefix = f'transport/{transport_type}/{logging_prefix}/'
         self.num_samples_to_log = num_samples_to_log
-        self.make_pd = make_pd
         self.verbose = verbose
         self.class_idx = class_idx
         self.conditional_key = conditional_key
@@ -149,15 +130,8 @@ class LatentTransport(Callback):
         self.test_metrics = None
 
         self.transport_operators = torch.nn.ModuleList([
-            LatentTransport._CLS_TABLE[transport_type](
-                self.dim,
-                diag=diag,
-                pg_star=pg_star,
-                stochastic=stochastic,
-                persistent=persistent,
-                make_pd=make_pd,
-                verbose=verbose
-            ) for _ in range(self.num_operators)
+            transport_operator(dim=self.dim, **transport_operator_kwargs)
+            for _ in range(self.num_operators)
         ])
 
     def on_fit_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
@@ -258,8 +232,11 @@ class LatentTransport(Callback):
 
         # Compute the transport cost distance
         mean_dist = self._val_dist()
-        pl_module.log(self.logging_prefix + 'avg_transport_cost', mean_dist)
+        pl_module.log(self.logging_prefix + 'avg_transport_cost', mean_dist, sync_dist=True)
+        self._log_images(trainer, pl_module)
 
+    @pytorch_lightning.utilities.rank_zero_only
+    def _log_images(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         if self.num_samples_to_log <= 0:
             return
 
@@ -269,7 +246,7 @@ class LatentTransport(Callback):
 
     def on_test_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         if self.test_metrics is not None:
-            pl_module.log_dict(self.test_metrics.compute())
+            pl_module.log_dict(self.test_metrics.compute(), sync_dist=True)
 
     def on_test_epoch_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         if self.test_metrics is not None:
@@ -279,7 +256,7 @@ class LatentTransport(Callback):
         latents_rearranged = self._permute_and_flatten(latents, flatten_batch=self.common_operator)
         key = 'source_samples' if source else 'target_samples'
         for latent, transport_operator in zip(latents_rearranged, self.transport_operators):
-            transport_operator.update(**{key: latent.to(transport_operator.device)})
+            transport_operator.update(**{key: latent})
 
     def _get_samples(self, pl_module: "pl.LightningModule", outputs: STEP_OUTPUT) -> Tuple[Tensor, Dict]:
         if not isinstance(outputs, dict):
@@ -378,7 +355,7 @@ class LatentTransport(Callback):
         samples, kwargs = self._get_samples(pl_module, batch)
 
         # Get the samples from the source (transformed) distribution
-        transformed = self.transformations(samples)
+        transformed = torch.stack([self.transformations(sample) for sample in samples])
 
         latents = self._encode(pl_module, transformed, **kwargs)
         transformed_decoded = self._decode(pl_module, latents, **kwargs)
@@ -386,13 +363,13 @@ class LatentTransport(Callback):
         samples_source = self._decode(pl_module, self._sample_like(latents, 'source'), **kwargs)
         samples_target = self._decode(pl_module, self._sample_like(latents, 'target'), **kwargs)
 
-        img_list = [samples_source, transformed, transformed_decoded, samples_transported, samples_target, samples]
+        img_list = [samples_source, transformed, transformed_decoded, samples_transported, samples, samples_target]
 
         collage = utils.Collage.list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
         return collage
 
     def _val_dist(self):
-        mean_dist = sum(t.compute() for t in self.transport_operators) / len(self.transport_operators)
+        mean_dist = sum([t.compute() for t in self.transport_operators]) / len(self.transport_operators)
         return mean_dist
 
 
@@ -409,13 +386,15 @@ class ConditionalLatentTransport(Callback):
 
     .. _TheoA: https://github.com/theoad
     """
-    def __init__(self, num_classes: int, log_prefix: str, num_samples_to_log: int = 10, *args, **kwargs):
+    def __init__(self, num_classes: int, logging_prefix: str, num_samples_to_log: int = 10, *args, **kwargs):
         self.num_classes = num_classes
         self.num_samples_to_log = num_samples_to_log
-        self.log_prefix = log_prefix
+        self.logging_prefix = logging_prefix
         self.transports = [
-            LatentTransport(*args, **kwargs, class_idx=i, num_samples_to_log=max(1, num_samples_to_log//num_classes))
-            for i in range(num_classes)
+            LatentTransport(
+                *args, **kwargs,
+                logging_prefix=logging_prefix, class_idx=i, num_samples_to_log=max(1, num_samples_to_log//num_classes)
+            ) for i in range(num_classes)
         ]
 
     def on_fit_start(self, *args, **kwargs):
@@ -444,7 +423,7 @@ class ConditionalLatentTransport(Callback):
             return
 
         avg_dist = sum([t._val_dist() for t in self.transports]) / self.num_classes
-        pl_module.log(self.log_prefix + 'avg_transport_cost', avg_dist)
+        pl_module.log(self.logging_prefix + 'avg_transport_cost', avg_dist)
 
         if self.num_samples_to_log <= 0:
             return
@@ -459,4 +438,4 @@ class ConditionalLatentTransport(Callback):
         collage = utils.Collage.list_to_collage(collage, self.num_samples_to_log)
 
         if hasattr(trainer.logger, 'log_image'):
-            trainer.logger.log_image(self.log_prefix, [collage], trainer.global_step)
+            trainer.logger.log_image(self.logging_prefix, [collage], trainer.global_step)

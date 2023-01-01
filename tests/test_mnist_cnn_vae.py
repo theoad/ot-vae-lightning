@@ -26,7 +26,7 @@ from ot_vae_lightning.data import MNIST32
 from ot_vae_lightning.networks import CNN, AutoEncoder
 from ot_vae_lightning.metrics.fid import FrechetInceptionDistance
 
-_PSNR_PERFORMANCE = 13
+_PSNR_PERFORMANCE = 15
 _MAX_EPOCH = 1
 
 
@@ -143,7 +143,7 @@ def test_vae_autoencoder_training(prog_bar=False, batch_size=50):
     assert results[0]['test/metrics/psnr'] > _PSNR_PERFORMANCE
 
     # Checkpoint loading
-    vae = VAE.load_from_checkpoint("vanilla_vae_autoencoder.ckpt")
+    vae = VAE.load_from_checkpoint("vanilla_vae_autoencoder.ckpt", metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}))
     vae.freeze()
 
     vae.test_metrics = MetricCollection({'psnr': PeakSignalNoiseRatio()}, prefix='test/metrics/')
@@ -206,7 +206,7 @@ def inference(ckpt_path, prog_bar=False, batch_size=50):
     )
 
     # Inference
-    vae = VAE.load_from_checkpoint(ckpt_path)
+    vae = VAE.load_from_checkpoint(ckpt_path, metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}))
     vae.freeze()  # put model in eval automatically
 
     # wraps user methods (forward, encode, decode) with appropriate pre/post-processing:

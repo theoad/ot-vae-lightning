@@ -1,10 +1,6 @@
 seed_everything: 42
 trainer:
   max_steps: 100000
-#  devices: auto
-#  strategy: ddp_find_unused_parameters_false
-#  gradient_clip_val: 1.0
-#  precision: 16
   logger:
     class_path: pytorch_lightning.loggers.WandbLogger
     init_args:
@@ -12,24 +8,25 @@ trainer:
       entity: gip
       dir: vae
       log_model: true
-      name: ffhq-128x8x8
+      name: ffhq-512x2x2
 model:
-  learning_rate: 1e-3
   metrics:
     class_path: torchmetrics.MetricCollection
     init_args:
       metrics:
         psnr: torchmetrics.image.psnr.PeakSignalNoiseRatio
         fid: ot_vae_lightning.metrics.fid.FrechetInceptionDistance
+  monitor: psnr
+  mode: max
   autoencoder:
     class_path: ot_vae_lightning.networks.AutoEncoder
     init_args:
       in_features: 3
       in_resolution: 128
-      latent_features: 128
-      latent_resolution: 8
+      latent_features: 512
+      latent_resolution: 2
       double_encoded_features: false
-      capacity: 32
+      capacity: 64
       n_layers: 2
       down_up_sample: 2
       normalization: batch
@@ -38,14 +35,30 @@ model:
       dropout: 0.
       residual: add
       time_embed_dim: null
-      max_attn_res: 0
+      max_attn_res: 8
       bias: true
 data:
   class_path: ot_vae_lightning.data.FFHQ128
   init_args:
     test_val_split: 0.9
     seed: 42
-    train_batch_size: 50
-    val_batch_size: 100
-    test_batch_size: 100
-    num_workers: 10
+    train_batch_size: 16
+    val_batch_size: 64
+    test_batch_size: 64
+    num_workers: 8
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 5e-4
+    betas: [0., 0.99]
+    weight_decay: 1e-4
+lr_scheduler:
+  class_path: pytorch_lightning.cli.ReduceLROnPlateau
+  init_args:
+    monitor: val/metrics/psnr
+    mode: max
+    factor: 0.75
+    patience: 8
+    verbose: True
+    threshold: 1e-1
+    min_lr: 1e-6

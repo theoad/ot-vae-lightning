@@ -15,7 +15,7 @@ import warnings
 import inspect
 import functools
 import itertools
-from typing import Tuple, Optional, Dict, List, Union, Callable, Any
+from typing import Tuple, Optional, Dict, List, Union, Any, Literal
 import numpy as np
 
 import torch
@@ -24,15 +24,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from torchmetrics import MetricCollection
-
 from ot_vae_lightning.model.base import VisionModule, VisionCLI
 import ot_vae_lightning.utils as utils
 import ot_vae_lightning.data.progressive_callback as progressive
 from ot_vae_lightning.prior import Prior
 from ot_vae_lightning.ot import LatentTransport
 from ot_vae_lightning.data import TorchvisionDatamodule
-from ot_vae_lightning.utils import Collage, FilterKwargs, PartialCheckpoint
+from ot_vae_lightning.utils import Collage, FilterKwargs
 
 __all__ = ['VAE']
 
@@ -55,21 +53,17 @@ class VAE(VisionModule):
     # noinspection PyUnusedLocal
     def __init__(
             self,
-            *,
+            *base_args,
+            monitor: str = "psnr",
+            mode: Literal['min', 'max'] = "max",
             prior: Optional[Prior] = None,
             autoencoder: Optional[nn.Module] = None,
             encoder: Optional[nn.Module] = None,
             decoder: Optional[nn.Module] = None,
-            metrics: Optional[MetricCollection] = None,
-            checkpoints: Optional[Dict[str, PartialCheckpoint]] = None,
-            inference_preprocess: Optional[Callable] = None,
-            inference_postprocess: Optional[Callable] = None,
-            ema_decay: Optional[float] = None,
-            learning_rate: float = 1e-3,
-            lr_sched_metric: Optional[str] = None,  # If `None`, CosineLr is used
             conditional: bool = False,
             expansion: int = 1,
             prior_kwargs: Dict[str, Any] = {},
+            **base_kwargs
     ) -> None:
         """
         Variational Auto Encoder with custom Prior
@@ -94,9 +88,8 @@ class VAE(VisionModule):
         :param encoder: A nn.Module with method `self.encode`. Can be left unfilled if `autoencoder` is filled
         :param decoder: A nn.Module with method `self.decode`. Can be left unfilled if `autoencoder` is filled
         :param learning_rate: The model learning rate. Default `1e-3`
-        :param checkpoints: See father class (ot_vae_lightning.model.base.BaseModule) docstring
         """
-        super().__init__(metrics, checkpoints, False, inference_preprocess, inference_postprocess, ema_decay)
+        super().__init__(*base_args, monitor=monitor, mode=mode, **base_kwargs)
         if autoencoder is None and (encoder is None or decoder is None):
             raise ValueError("At least one of `autoencoder` or (`encoder`, `decoder`) parameters must be set")
         if autoencoder is not None and (encoder is not None or decoder is not None):
@@ -156,20 +149,12 @@ class VAE(VisionModule):
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(
-            self.optim_parameters(), lr=self.hparams.learning_rate, betas=(0.9, 0.999)
+            self.optim_parameters(), lr=1e-3, betas=(0.9, 0.999)
         )
-        if self.hparams.lr_sched_metric is None:
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                opt, T_max=self.trainer.estimated_stepping_batches, eta_min=1e-6, last_epoch=self.trainer.global_step or -1
-            )
-            lr_scheduler = {"scheduler": scheduler, "interval": "step"}
-        else:
-            name = self.val_metrics.prefix + self.hparams.lr_sched_metric
-            mode = 'max' if self.val_metrics[self.hparams.lr_sched_metric].higher_is_better else 'min'
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                opt, mode=mode, factor=0.75, patience=8, verbose=True, threshold=1e-1, min_lr=1e-6
-            )
-            lr_scheduler = {"scheduler": scheduler, "monitor": name}
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode=self.mode, factor=0.75, patience=8, verbose=True, threshold=1e-1, min_lr=1e-6
+        )
+        lr_scheduler = {"scheduler": scheduler, "monitor": self.monitor}
         return {"optimizer": opt, "lr_scheduler": lr_scheduler}
 
     def recon_loss(self, reconstructions: Tensor, target: Tensor, **kwargs) -> Tensor:
@@ -288,12 +273,10 @@ if __name__ == '__main__':
     import re
     import lovely_tensors as lt
     import ot_vae_lightning.data  # noqa: F401
+    from ot_vae_lightning.ot.transport import GaussianTransport, GMMTransport
 
     lt.monkey_patch()
     # torch.set_float32_matmul_precision('high')
-
-    def camel2snake(name):
-        return name[0].lower() + re.sub(r'(?!^)[A-Z]', lambda x: '_' + x.group(0).lower(), name[1:])
 
     cli = VisionCLI(
         VAE, TorchvisionDatamodule,
@@ -317,19 +300,22 @@ if __name__ == '__main__':
     cli.trainer.callbacks += [
         LatentTransport(
             transport_dims=(1,),
-            diag=False,
-            stochastic=False,
-            logging_prefix=f"mat_per_needle_{camel2snake(transform.__class__.__name__)}",
+            transport_operator=GMMTransport,
+            logging_prefix=f"mat_per_needle_{utils.camel2snake(transform.__class__.__name__)}",
             size=cli.model.latent_size,
             transformations=transform,
-            transport_type="gaussian",
             source_latents_from_train=False,
             target_latents_from_train=False,
             unpaired=True,
-            make_pd=True,
             verbose=True,
-            pg_star=0,
-            common_operator=True
+            common_operator=True,
+            # diag=False,
+            make_pd=True,
+            stochastic=True,
+            pg_star=0.,
+            n_components_source=64,
+            n_components_target=256,
+            transport_type='sample'
         ) for transform in transforms
     ]
 

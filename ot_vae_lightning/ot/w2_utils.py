@@ -1,7 +1,7 @@
 """
 ************************************************************************************************************************
 
-`PyTorch <https://pytorch.org/>`_ implementation of Wasserstein 2 Optimal transport utilities
+`PyTorch <https://pytorch.org/>`_ implementation of Wasserstein 2 utilities
 
 Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
@@ -11,18 +11,16 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from math import sqrt
+from itertools import groupby
+from typing import Tuple, Optional, List
+
 import torch
-from torch import Tensor, logical_not
-from typing import Tuple, Optional
-from torch.distributions.multivariate_normal import MultivariateNormal
-from torch.distributions import Normal
+from torch import Tensor
+from torch.types import _dtype
 import warnings
 from ot_vae_lightning.ot.matrix_utils import *
 
 __all__ = [
-    'compute_transport_operators',
-    'apply_transport',
     'w2_gaussian',
     'batch_w2_dissimilarity_gaussian_diag',
     'batch_w2_gmm_diag',
@@ -30,297 +28,7 @@ __all__ = [
     'gaussian_barycenter_diag'
 ]
 
-
 # ******************************************************************************************************************** #
-
-
-def compute_transport_operators(
-        cov_source: Tensor,
-        cov_target: Tensor,
-        stochastic: bool,
-        diag: bool,
-        pg_star: float = 0,
-        make_pd: bool = False,
-        verbose: bool = False
-) -> Tuple[Tensor, Optional[Tensor]]:
-    r"""
-    Batch implementation of eq. 17, 19 in [1]
-
-    .. math::
-
-        (17) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{-0.5}_{s} (\Sigma^{0.5}_{s} \Sigma_{t}
-         \Sigma^{0.5}_{s})^{0.5} \Sigma^{-0.5}_{s} + P/G^{*} I
-
-        (19) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{+0.5}_{t} (\Sigma^{0.5}_{t} \Sigma_{s}
-         \Sigma^{0.5}_{t})^{0.5} \Sigma^{-0.5}_{t} \Sigma^{\dagger}_{s} + P/G^{*} I
-
-             \Sigma_w = \Sigma^{0.5}_{t} (I - \Sigma^{0.5}_{t} T^{*} \Sigma^{\dagger}_{s} T^{*}
-              \Sigma^{0.5}_{t}) \Sigma^{0.5}_{t},  T^{*} = T_{t \longrightarrow s} (17)
-
-    [1] D. Freirich, T. Michaeli and R. Meir.
-    `A Theory of the Distortion-Perception Tradeoff in Wasserstein Space <https://proceedings.neurips.cc/paper/2021/
-    hash/d77e68596c15c53c2a33ad143739902d-Abstract.html>`_
-
-    :param cov_source: Batch of SPD matrices. Source covariances. [B, D] or [B, D, D] (also supports broadcast [D])
-    :param cov_target: Batch of SPSD matrices. Target covariances. [B, D] or [B, D, D] (also supports broadcast [D])
-    :param stochastic: If ``True`` return (T_{s -> t}, \Sigma_w) of (19) else return (T_{s -> t}, `None`) (17)
-    :param diag: If ``True`` expects cov_source and cov_target to be batch of vectors (representing diagonal matrices)
-    :param pg_star: Perception-distortion ratio. can be seen as temperature.
-     (`p_gstar=0` --> best perception, `p_gstar=1` --> best distortion). Default `0`.
-    :param make_pd: If ``True``, corrects matrices needed to be PD or PSD with by adding their minimum eigenvalue to
-                their diagonal.
-    :param verbose: If ``True``, warns about correction value added to the diagonal of the matrices
-
-    :return: Batch of transport operators T_{s -> t} and \Sigma_w
-    """
-    # TL;DR
-    # @theoad: Sorry for the spaghetti function. Error checking is better this way than with modular calls.
-    # Parameter validation is done in this wrapper function and actual computations are done in modular calls.
-
-    # ----------------------------------------- PARAMETER CHECKS + BROADCAST ----------------------------------------- #
-    if not 0 <= pg_star <= 1:
-        raise ValueError(f"pg_star must be in the interval [0, 1], got {pg_star}")
-
-    if cov_source.isinf().any():
-        raise ValueError(f"Found {cov_source.isinf().nonzero().size(0)} `inf` elements in `cov_source`")
-    if cov_source.isnan().any():
-        raise ValueError(f"Found {cov_source.isnan().nonzero().size(0)} `nan` elements in `cov_source`")
-    if cov_target.isinf().any():
-        raise ValueError(f"Found {cov_target.isinf().nonzero().size(0)} `inf` elements in `cov_target`")
-    if cov_target.isnan().any():
-        raise ValueError(f"Found {cov_target.isnan().nonzero().size(0)} `nan` elements in `cov_target`")
-
-    if diag:
-        # cov_source and cov_target are assumed to be batch of vectors representing diagonal matrices
-        if cov_source.dim() not in [1, 2] or cov_target.dim() not in [1, 2]:
-            raise ValueError(f"""
-            `diag`=True: `cov_source` and `cov_target` should be 1-dim or 2-dim tensors (batch of diagonals),
-             got cov_source.dim()={cov_source.dim()} and cov_target.dim()={cov_target.dim()}.
-            """)
-
-        # explicit broadcast
-        squeeze = cov_source.dim() == 1 and cov_target.dim() == 1
-        if cov_source.dim() == 1:
-            cov_source = cov_source.unsqueeze(0)
-        if cov_target.dim() == 1:
-            cov_target = cov_target.unsqueeze(0)
-
-        if cov_source.size(1) != cov_target.size(1):
-            raise ValueError(f"""
-            `cov_source` and `cov_target` should have the same dimensionality,
-             got cov_source.size(1)={cov_source.size(1)} and cov_target.size(1)={cov_target.size(1)}.
-            """)
-
-        cov_source_neg = cov_source < 0 if stochastic else cov_source <= 0
-        cov_target_neg = cov_target <= 0 if stochastic else cov_target < 0
-        if cov_source_neg.any():
-            semi = 'semi-' if stochastic else ''
-            if make_pd:
-                val = cov_source.clamp(min=0 if stochastic else STABILITY_CONST) - cov_source
-                cov_source = cov_source.clamp(min=0 if stochastic else STABILITY_CONST)
-                if verbose:
-                    warnings.warn(f"""
-                    `cov_source` is not positive {semi}definite. Adding a small value to the 
-                    diagonal (<{'{:.2e}'.format(val.max().item())}) to ensure the matrices are positive {semi}definite.
-                    """)
-            raise ValueError(f"""
-            `diag`=True, `stochastic`={stochastic}: In this configuration, `cov_source` should be
-             {'non-negative' if stochastic else 'positive'} (as diagonals of positive {semi}definite matrices).
-             Found {cov_source_neg.count_nonzero().item()}/{cov_source.numel()}
-             {'negative' if stochastic else 'non-positive'} elements in `cov_source`.
-            """)
-        if stochastic: cov_source[cov_source < STABILITY_CONST] = 0
-
-        if cov_target_neg.any():
-            semi = '' if stochastic else 'semi-'
-            if make_pd:
-                val = cov_target.clamp(min=0 if stochastic else STABILITY_CONST) - cov_target
-                cov_target = cov_target.clamp(min=0 if stochastic else STABILITY_CONST)
-                if verbose:
-                    warnings.warn(f"""
-                    `cov_target` is not positive {semi}definite. Adding a small value to the 
-                    diagonal (<{'{:.2e}'.format(val.max().item())}) to ensure the matrices are positive {semi}definite.
-                    """)
-            raise ValueError(f"""
-            `diag`=True, `stochastic`={stochastic}: In this configuration, `cov_target` should be
-             {'positive' if stochastic else 'non-negative'} (as diagonals of positive {semi}definite matrices).
-             Found {cov_target_neg.count_nonzero().item()}/{cov_target.numel()}
-             {'non-positive' if stochastic else 'negative'} elements in `cov_target`.
-            """)
-    else:  # not diag
-        if cov_source.dim() not in [2, 3] or cov_target.dim() not in [2, 3]:
-            raise ValueError(f"""
-            `cov_source` and `cov_target` should be 2-dim or 3-dim tensors (batch of matrices),
-             got {cov_source.dim()} and {cov_target.dim()}
-            """)
-
-        # explicit broadcast
-        squeeze = cov_source.dim() == 2 and cov_target.dim() == 2
-        if cov_source.dim() == 2:
-            cov_source = cov_source.unsqueeze(0)
-        if cov_target.dim() == 2:
-            cov_target = cov_target.unsqueeze(0)
-
-        if cov_source.shape[1:] != cov_target.shape[1:]:
-            raise ValueError(f"""
-            `cov_source` and `cov_target` should have the same dimensionality,
-             got {cov_source.shape[1:]} and {cov_target.shape[1:]}
-            """)
-
-        cov_source_spd = is_spd(cov_source, strict=not stochastic)
-        cov_target_spd = is_spd(cov_target, strict=stochastic)
-
-        if not cov_source_spd.all():
-            semi = 'semi-' if stochastic else ''
-            if is_symmetric(cov_source).all() and make_pd:
-                cov_source, val = make_psd(cov_source, strict=not stochastic, return_correction=True)
-                if verbose:
-                    warnings.warn(f"""
-                    `cov_source` is not positive {semi}definite. Adding a small value to the 
-                    diagonal (<{'{:.2e}'.format(val.max().item())}) to ensure the matrices are positive {semi}definite.
-                    """)
-            else:
-                num_not_psd = logical_not(cov_source_spd).count_nonzero().item()
-                num_psd = cov_source_spd.count_nonzero().item()
-                raise ValueError(f"""
-                `diag`=False, `stochastic`={stochastic}: In this configuration, `cov_source` should be a batch of
-                 symmetric and positive {semi}definite matrices.
-                 Found {num_not_psd}/{num_psd + num_not_psd} matrices in the batch that are not positive {semi}definite.
-                 In order to automatically add small value to the matrices diagonal use `make_pd`=True.
-                """)
-
-        if not cov_target_spd.all():
-            semi = '' if stochastic else 'semi-'
-            if is_symmetric(cov_target).all() and make_pd:
-                cov_target, val = make_psd(cov_target, strict=stochastic, return_correction=True)
-                if verbose:
-                    warnings.warn(f"""
-                    `cov_target` is not positive {semi}definite. Adding a small value to the 
-                    diagonal (<{'{:.2e}'.format(val.max().item())}) to ensure the matrices are positive {semi}definite.
-                    """)
-            else:
-                num_not_psd = logical_not(cov_target_spd).count_nonzero().item()
-                num_psd = cov_target_spd.count_nonzero().item()
-                raise ValueError(f"""
-                `diag`=False, `stochastic`={stochastic}: In this configuration, `cov_target` should be a batch of
-                 symmetric and positive {semi}definite matrices.
-                 Found {num_not_psd}/{num_psd + num_not_psd} matrices in the batch that are not positive {semi}definite.
-                 In order to add small value to the matrices diagonal use `make_pd`=True.
-                """)
-    # ------------------------------------------- END OF PARAMETER CHECKS -------------------------------------------- #
-
-    if diag:
-        if stochastic:
-            T, Cw = _compute_transport_diag_stochastic(cov_source, cov_target, pg_star)
-            if (Cw <= 0).any():
-                warnings.warn(f"""
-                The noise covariance matrix is not positive definite. Falling back to the non-stochastic implementation
-                """)
-                T, Cw = _compute_transport_diag(cov_source, cov_target, pg_star)
-        else: T, Cw = _compute_transport_diag(cov_source, cov_target, pg_star)
-    else:
-        if stochastic:
-            T, Cw = _compute_transport_full_mat_stochastic(cov_source, cov_target, pg_star)
-            if not is_spd(Cw, strict=True).all():
-                warnings.warn(f"""
-                The noise covariance matrix is not positive definite. Falling back to the non-stochastic implementation
-                """)
-                T, Cw = _compute_transport_full_mat(cov_source, cov_target, pg_star)
-        else: T, Cw = _compute_transport_full_mat(cov_source, cov_target, pg_star)
-
-    T = T.squeeze(0) if squeeze else T
-    Cw = Cw.squeeze(0) if squeeze and Cw is not None else None
-    return T, Cw
-
-
-# ******************************************************************************************************************** #
-
-
-def apply_transport(
-        input: Tensor,
-        mean_source: Tensor,
-        mean_target: Tensor,
-        T: Tensor,
-        Cw: Optional[Tensor] = None,
-        diag: bool = False,
-) -> Tensor:
-    r"""
-    Executes optimal W2 transport of the sample given as `input` using the provided mean and transport operators (T, Cw)
-    in batch fashion according to eq. 17 and eq. 19 in [1]
-
-    .. math::
-
-        (17) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{-0.5}_{s} (\Sigma^{0.5}_{s} \Sigma_{t}
-         \Sigma^{0.5}_{s})^{0.5} \Sigma^{-0.5}_{s} + P/G^{*} I
-
-        (19) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{+0.5}_{t} (\Sigma^{0.5}_{t} \Sigma_{s}
-         \Sigma^{0.5}_{t})^{0.5} \Sigma^{-0.5}_{t} \Sigma^{\dagger}_{s} + P/G^{*} I
-
-             \Sigma_w = \Sigma^{0.5}_{t} (I - \Sigma^{0.5}_{t} T^{*} \Sigma^{\dagger}_{s} T^{*}
-              \Sigma^{0.5}_{t}) \Sigma^{0.5}_{t},  T^{*} = T_{t \longrightarrow s} (17)
-
-    [1] D. Freirich, T. Michaeli and R. Meir.
-    `A Theory of the Distortion-Perception Tradeoff in Wasserstein Space <https://proceedings.neurips.cc/paper/2021/
-    hash/d77e68596c15c53c2a33ad143739902d-Abstract.html>`_
-
-    :param input: Batch of samples from the source distribution, to transport to the target distribution. [N, D1]
-    :param mean_source: Mean of the source distribution. [D1]
-    :param mean_target: Mean of the target distribution. [D2]
-    :param T: transport Operator from the source to the target distribution. [D2, D1]
-    :param Cw: Noise covariance if the source distribution is degenerate. [D2, D2]
-    :param diag: If ``True`` expects T and Cw to be vectors (representing diagonal matrices)
-
-    :return: T (input - mean_source) + mean_target + W,   W~Normal(0, Cw). [N, D2]
-    """
-    # ----------------------------------------------- PARAMETER CHECKS ----------------------------------------------- #
-    if input.dim() != 2:
-        raise ValueError(f"`input` should be a 2-dim matrix (batch of vectors), got input.dim()={input.dim()}")
-    if mean_source.dim() != 1:
-        raise ValueError(f"`mean_source` should be a 1-dim vector, got mean_source.dim()={mean_source.dim()}")
-    if mean_target.dim() != 1:
-        raise ValueError(f"`mean_target` should be a 1-dim vector, got mean_target.dim()={mean_target.dim()}")
-    if diag and T.dim() != 1:
-        raise ValueError(f"`diag`=True: `T` should be a 1-dim vector, got T.dim()={T.dim()}")
-    if not diag and T.dim() != 2:
-        raise ValueError(f"`diag`=False: `T` should be a 2-dim matrix, got T.dim()={T.dim()}")
-    if mean_source.size(0) != input.size(1):
-        raise ValueError(f""" `mean_source` should have the same dimensionality as `input`, 
-        got {mean_source.size(0)} and {input.size(1)}""")
-    if T.size(-1) != input.size(1):
-        raise ValueError(f"`T` should have the same dimensionality as `input`, got {T.size(-1)} and {input.size(1)}")
-    if T.size(0) != mean_target.size(0):
-        raise ValueError(f"""`mean_target` should have the same dimensionality as `T`'s first dimension, 
-        got {T.size(0)} and {mean_target.size(0)}""")
-    if Cw is not None:
-        if diag and Cw.dim() != 1:
-            raise ValueError(f"`diag`=True: `Cw` should be a 1-dim vector, got Cw.dim()={Cw.dim()}")
-        if not diag and Cw.dim() != 2:
-            raise ValueError(f"`diag`=False: `Cw` should be a 2-dim matrix, got Cw.dim()={Cw.dim()}")
-        if Cw.size(0) != T.size(0):
-            raise ValueError(f"""`Cw` should have the same dimensionality as `T`'s first dimension, 
-            got {T.size(0)} and {Cw.size(0)}""")
-        if Cw.dim() == 2 and not is_spd(Cw, strict=True):
-            raise ValueError(f"As matrix, `Cw` should be a symmetric and positive definite")
-        if Cw.dim() == 1 and (Cw <= 0).any():
-            raise ValueError(f"As vector, `Cw` should contain only positive values")
-    # ------------------------------------------- END OF PARAMETER CHECKS -------------------------------------------- #
-
-    w = 0
-    if Cw is not None:
-        w = torch.zeros_like(mean_target)
-        if diag: w = Normal(w, Cw).rsample()
-        else: w = MultivariateNormal(w, Cw).rsample()
-
-    x_centered = input - mean_source
-    if diag: x_transported = T * x_centered
-    else: x_transported = torch.matmul(T, x_centered.T).T
-
-    x_transported = x_transported + mean_target + w
-    return x_transported
-
-
-# ******************************************************************************************************************** #
-
 
 def w2_gaussian(
         mean_source: Tensor,
@@ -328,92 +36,38 @@ def w2_gaussian(
         cov_source: Tensor,
         cov_target: Tensor,
         make_pd: bool = False,
-        verbose: bool = False
+        verbose: bool = False,
+        dtype: Optional[_dtype] = torch.double
 ) -> Tensor:
     """
     Computes closed form squared W2 distance between Gaussian distributions (also known as Gelbrich Distance)
-    :param mean_source: A 1-dim vectors representing the source distribution mean
-    :param mean_target: A 1-dim vectors representing the target distribution mean
-    :param cov_source: A 2-dim matrix representing the source distribution covariance
-    :param cov_target: A 2-dim matrix representing the target distribution covariance
+    :param mean_source: A 1-dim vectors representing the source distribution mean with optional leading batch dims [*, D]
+    :param mean_target: A 1-dim vectors representing the target distribution mean with optional leading batch dims [*, D]
+    :param cov_source: A 2-dim matrix representing the source distribution covariance [*, D, D]
+    :param cov_target: A 2-dim matrix representing the target distribution covariance [*, D, D]
     :param make_pd: If ``True``, corrects matrices needed to be PD or PSD with by adding their minimum eigenvalue to
                     their diagonal.
     :param verbose: If ``True``, warns about correction value added to the diagonal of the matrices
+    :param dtype: The type from which the result will be computed.
+
     :return: The squared Wasserstein 2 distance between N(mean_source, cov_source) and N(mean_target, cov_target)
     """
-    if mean_source.dim() != 1:
-        raise ValueError(f"""
-        `mean_source` should be a 1-dim vectors representing the source
-         distribution mean, got mean_source.dim()={mean_source.dim()}
-        """)
-
-    if mean_target.dim() != 1:
-        raise ValueError(f"""
-        `mean_target` should be a 1-dim vectors representing the target
-         distribution mean, got mean_target.dim()={mean_target.dim()}
-         """)
-
-    if cov_source.dim() != 2:
-        raise ValueError(f"""
-        `cov_source` should be a 2-dim matrix representing the source
-         distribution covariance, got cov_source.dim()={cov_source.dim()}
-         """)
-
-    if cov_target.dim() != 2:
-        raise ValueError(f"""
-        `cov_target` should be a 2-dim matrix representing the target
-         distribution covariance, got cov_target.dim()={cov_target.dim()}
-         """)
-
-    if not (mean_source.size(0) == mean_target.size(0) == cov_source.size(0) ==
-            cov_source.size(1) == cov_target.size(0) == cov_target.size(1)):
-        raise ValueError(f"""
-        All the inputs dimensions should match, got {mean_source.size(0)}, {mean_target.size(0)},
-        {cov_source.size(0)}, {cov_source.size(1)}, {cov_target.size(0)}, {cov_target.size(1)}
-        """)
-
-    if not is_spd(cov_source, strict=False):
-        if not is_symmetric(cov_source):
-            raise ValueError("`cov_source` should be symmetric")
-        if make_pd:
-            cov_target, val = make_psd(cov_source, strict=False, return_correction=True)
-            if verbose:
-                warnings.warn("""
-                `cov_source` is not positive semi definite. Adding a small value to the 
-                diagonal (<{:.2e}) to ensure the matrices are positive definite
-                """.format(val.max().item()))
-        else:
-            raise ValueError("`cov_source` should be symmetric and positive semi-definite")
-
-    if not is_spd(cov_target, strict=False):
-        if not is_symmetric(cov_target):
-            raise ValueError("`cov_target` should be symmetric")
-        if make_pd:
-            cov_target, val = make_psd(cov_target, strict=False, return_correction=True)
-            if verbose:
-                warnings.warn("""
-                `cov_target` is not positive semi definite. Adding a small value to the 
-                diagonal (<{:.2e}) to ensure the matrices are positive definite
-                """.format(val.max().item()))
-        else:
-            raise ValueError("`cov_target` should be symmetric and positive semi-definite")
+    mean_source, mean_target, cov_source, cov_target = validate_args(  # noqa
+        mean_source, 'mean_source', 'vec', mean_target, 'mean_target', 'vec', cov_source, 'cov_source', 'spd', cov_target, 'cov_target', 'spd',
+        make_pd=make_pd, verbose=verbose, dtype=torch.double
+    )
 
     cov_target_sqrt = sqrtm(cov_target)
     mix = cov_target_sqrt @ cov_source @ cov_target_sqrt
 
-    if not is_spd(mix, strict=False):
-        mix, val = make_psd(mix, strict=False, return_correction=True)
-        if verbose:
-            warnings.warn("""
-            `cov_target_sqrt @ cov_source @ cov_target_sqrt` is not positive definite.
-             Adding a small value to the  diagonal (<{:.2e}) to ensure the matrices are
-             positive definite""".format(val.max().item()))
-
-    squared_w2 = (
-            torch.linalg.vector_norm(mean_source - mean_target) ** 2 +
-            torch.trace(cov_source + cov_target - 2 * sqrtm(mix))
+    mix, = validate_args(
+        mix, 'cov_target_sqrt @ cov_source @ cov_target_sqrt', 'spsd',
+        make_pd=make_pd, verbose=verbose, dtype=dtype
     )
-    return squared_w2
+
+    mean_shift = torch.sum((mean_source - mean_target) ** 2, dim=-1)
+    cov_shift_trace = torch.diagonal(cov_source + cov_target - 2 * sqrtm(mix), dim1=-2, dim2=-1).sum(dim=-1)
+    return mean_shift + cov_shift_trace
 
 
 # ******************************************************************************************************************** #
@@ -423,7 +77,8 @@ def batch_w2_dissimilarity_gaussian_diag(
         mean_source: Tensor,
         mean_target: Tensor,
         var_source: Tensor,
-        var_target: Tensor
+        var_target: Tensor,
+        dtype: Optional[_dtype] = torch.double
 ) -> Tensor:
     r"""
     Computes the dissimilarity matrix:
@@ -433,41 +88,36 @@ def batch_w2_dissimilarity_gaussian_diag(
         D_{bij} = W^{2}_{2}(\mathcal{N}(\mu_{bi}^{s} , \sigma_{bi}^{s}^{2}),
          \mathcal{N}(\mu_{bj}^{t} , \sigma_{bj}^{t}^{2}))
 
-    :param mean_source: batch of means of source distributions. [B, N, D...]
-    :param mean_target: batch of means of target distributions. [B, M, D...]
-    :param var_source: batch of vars of source distribution (scale). [B, N, D...]
-    :param var_target: batch of vars of target distribution (scale). [B, M, D...]
+    :param mean_source: means of source distributions. [*, N, D]
+    :param mean_target: means of target distributions. [*, M, D]
+    :param var_source: vars of source distribution (scale). [*, N, D]
+    :param var_target: vars of target distribution (scale). [*, M, D]
+    :param dtype: The type from which the result will be computed.
 
-    :return: Dissimilarity matrix D [B, N, M] where D[b, i, j] = W2(Sbi, Tbj).
+    :return: Dissimilarity matrix D [*, N, M] where D[b, i, j] = W2(Sbi, Tbj).
     """
-    if not (mean_source.size() == mean_target.size() == var_source.size() == var_target.size()):
-        raise ValueError(f"""
-        All the input parameters are expected to have the same shape,
-        got {mean_source.size()}, {mean_target.size()}, {var_source.size()} and {var_target.size()} 
-        which are not compatible with the function implementation.
-        """)
-    if mean_source.dim() < 3 or mean_target.dim() < 3 or var_source.dim() < 3 or var_target.dim() < 3:
-        raise ValueError(f"""
-        All the input parameters are expected to have at least 3 dimensions,
-        got {mean_source.dim()}, {mean_target.dim()}, {var_source.dim()} and {var_target.dim()} 
-        which are not compatible with the function implementation. Please unsqueeze the Tensor to obtain
-        batch of sequences of tensors.
-        """)
-    mean_source = mean_source.flatten(2)
-    mean_target = mean_target.flatten(2)
-    var_source = var_source.flatten(2)
-    var_target = var_target.flatten(2)
+    mean_source, var_source = validate_args(  # noqa
+        mean_source, 'mean_source', 'vec',
+        var_source, 'var_source', 'var',
+        dtype=dtype
+
+    )
+    mean_target, var_target = validate_args(  # noqa
+        mean_target, 'mean_source', 'vec',
+        var_target, 'var_source', 'var',
+        dtype=dtype
+    )
 
     dist_mean = (
-            (mean_source**2).sum(-1, keepdim=True) +                                 # [B, N, 1]
-            (mean_target**2).sum(-1).unsqueeze(-2) -                                 # [B, 1, M]
-            2 * (mean_source @ mean_target.transpose(-2, -1))                        # [B, N, M]
+            (mean_source**2).sum(-1, keepdim=True) +                                 # [*, N, 1]
+            (mean_target**2).sum(-1).unsqueeze(-2) -                                 # [*, 1, M]
+            2 * (mean_source @ mean_target.transpose(-2, -1))                        # [*, N, M]
     )
 
     dist_var = (
-            var_source.sum(-1, keepdim=True) +                                       # [B, N, 1]
-            var_target.sum(-1).unsqueeze(-2) -                                       # [B, 1, M]
-            2 * (torch.sqrt(var_source) @ torch.sqrt(var_target.transpose(-2, -1)))  # [B, N, M]
+            var_source.sum(-1, keepdim=True) +                                       # [*, N, 1]
+            var_target.sum(-1).unsqueeze(-2) -                                       # [*, 1, M]
+            2 * (torch.sqrt(var_source) @ torch.sqrt(var_target.transpose(-2, -1)))  # [*, N, M]
     )
 
     w2 = dist_mean + dist_var
@@ -484,7 +134,8 @@ def batch_w2_gmm_diag(
         var_target: Tensor,
         weight_source: Optional[Tensor] = None,
         weight_target: Optional[Tensor] = None,
-        **kwargs
+        dtype: Optional[_dtype] = torch.double,
+        **sinkhorn_kwargs
 ) -> Tuple[Tensor, Tensor]:
     r"""
     Computes the entropy-regularized squared W2 distance[1] between the following gaussian mixtures:
@@ -500,21 +151,36 @@ def batch_w2_gmm_diag(
     [1] Marco Cuturi, Sinkhorn Distances: Lightspeed Computation of Optimal Transport
     [2] Yongxin Chen, Tryphon T. Georgiou and Allen Tannenbaum Optimal transport for Gaussian mixture models
 
-    :param mean_source: batch of means of source distributions. [B, N, D...]
-    :param mean_target: batch of means of target distributions. [B, M, D...]
-    :param var_source: batch of vars of source distribution (scale). [B, N, D...]
-    :param var_target: batch of vars of target distribution (scale). [B, M, D...]
-    :param weight_source: Probability vector of source GMM distribution. [B, N...]
-    :param weight_target: Probability vector of target GMM distribution. [B, M...]
+    :param mean_source: batch of means of source distributions. [*, N, D]
+    :param mean_target: batch of means of target distributions. [*, M, D]
+    :param var_source: batch of vars of source distribution (scale). [*, N, D]
+    :param var_target: batch of vars of target distribution (scale). [*, M, D]
+    :param weight_source: Probability vector of source GMM distribution. [*, N]
+    :param weight_target: Probability vector of target GMM distribution. [*, M]
+    :param dtype: The type from which the result will be computed.
 
     :return: Total W2 cost between GMMs and GMMt SUM_{i,j} cost(i, j) * pi(i, j)
-             Coupling matrix pi [B, N, M]
+             Coupling matrix pi [*, N, M]
     """
-    # TODO: parameter checking
-    weight_source = torch.ones_like(mean_source[0,:,0])/mean_source.size(1) if weight_source is None else weight_source
-    weight_target = torch.ones_like(mean_target[0,:,0])/mean_target.size(1) if weight_target is None else weight_target
+    weight_source = weight_source or torch.ones_like(mean_source.select(dim=-1, index=0)) / mean_source.size(-2)
+    weight_target = weight_target or torch.ones_like(mean_target.select(dim=-1, index=0)) / mean_target.size(-2)
+
+    mean_source, var_source, weight_source = validate_args(  # noqa
+        mean_source, 'mean_source', 'vec',
+        var_source, 'var_source', 'var',
+        weight_source, 'weight_source', 'prob',
+        dtype=dtype
+    )
+
+    mean_target, var_target, weight_target = validate_args(  # noqa
+        mean_target, 'mean_target', 'vec',
+        var_target, 'var_target', 'var',
+        weight_target, 'weight_target', 'prob',
+        dtype=dtype
+    )
+
     cost_matrix = batch_w2_dissimilarity_gaussian_diag(mean_source, mean_target, var_source, var_target)
-    coupling = sinkhorn_log(weight_source, weight_target, cost_matrix/cost_matrix.max(), **kwargs)
+    coupling = sinkhorn_log(weight_source, weight_target, cost_matrix/cost_matrix.max(), **sinkhorn_kwargs)
 
     # elem-wise multiplication and sum => SUM cost(i,j) pi(i, j)
     total_cost = torch.sum(cost_matrix * coupling, dim=(-2, -1))
@@ -540,16 +206,15 @@ def sinkhorn_log(
 
     [1] Marco Cuturi, Sinkhorn Distances: Lightspeed Computation of Optimal Transport
 
-    :param a: probability vector. [B, N]
-    :param b: probability vector. [B, M]
-    :param C: cost matrix. [B, N, M]
+    :param a: probability vector. [*, N]
+    :param b: probability vector. [*, M]
+    :param C: cost matrix. [*, N, M]
     :param reg: entropic regularisation weight. Default = 1e-3
     :param max_iter: max number of fixed point iterations
     :param threshold: stopping threshold of total variation between successive iterations
 
-    :return: Coupling matrix (optimal transport plan). [B, N, M]
+    :return: Coupling matrix (optimal transport plan). [*, N, M]
     """
-    # TODO: parameter checking
     def log_boltzmann_kernel(K: Tensor, u: Tensor, v: Tensor):
         return (u.unsqueeze(-1) + v.unsqueeze(-2) - K) / reg
 
@@ -600,97 +265,127 @@ def gaussian_barycenter_diag(
     [1] P. C. Alvarez-Esteban, E. del Barrio, J. Cuesta-Albertos, and C. Matran,
     A fixed-point approach to barycenters in Wasserstein space
 
-    :param mean: mean components. [C, D]
-    :param var: vars components. [C, D]
-    :param weights: Batch of probability vector. [N, C]
+    :param mean: mean components. [*, N, D]
+    :param var: vars components. [*, N, D]
+    :param weights: Batch of probability vector. [*, N]
 
     :return: :math: `\mu_{barycenter}, \sigma_{barycenter}^2`
     """
-    # TODO: parameter checking
-    mean_b = torch.matmul(weights, mean)
-    var_b = torch.matmul(weights, torch.sqrt(var)) ** 2
+    mean, var, weights = validate_args(  # noqa
+        mean, 'mean', 'vec',
+        var, 'var', 'var',
+        weights, 'weights', 'prob'
+    )
+
+    mean_b = weights @ mean
+    var_b = (weights @ torch.sqrt(var)) ** 2
     return mean_b, var_b
 
 
 # ******************************************************************************************************************** #
 
 
-def _compute_transport_diag(
-        cov_source: Tensor,
-        cov_target: Tensor,
-        p_gstar: float
-) -> Tuple[Tensor, Optional[Tensor]]:
-    """
-    Helper function for `compute_transport_operators`.
-    This function doesn't have any parameter checking and was not designed to be standalone.
-    Use with care.
-    """
-    return (1 - p_gstar) * torch.sqrt(cov_target / cov_source + STABILITY_CONST) + p_gstar, None
+class DimError(Exception):
+    pass
 
+def validate_args(
+        *args,
+        make_pd: bool = False,
+        verbose: bool = False,
+        dtype: Optional[_dtype] = None,
+        tol: float = STABILITY_CONST
+) -> Tuple[Tensor]:
+    dim_stack = []
+    comp_stack = []
+    batch_dims = []
+    new_args = []
+    has_components = 'prob' in args
+    for arg, name, arg_type in zip(args[::3], args[1::3], args[2::3]):
+        assert isinstance(name, str), "Flow assertion Error: name should be a string"
+        if not isinstance(arg, Tensor):
+            raise DimError(f"""
+            `{name}` is expected to be a torch.Tensor, got `{type(arg)}` instead.
+            """)
+        if arg_type in ['vec', 'var']:
+            if arg.dim() < 1 + int(has_components):
+                raise DimError(f"""
+                `{name}` should be 1-dim vectors {'with a leading component dimension' if has_components else ''}
+                (+ optional leading batch dimensions), got `{name}.dim()={arg.dim()}`
+                """)
+            if arg_type == 'var':
+                if (arg < 0).any():
+                    raise ValueError(f"""
+                    `{name}` is expected to be a valid variance vector with positive entries.
+                    """)
+            dim_stack.append(arg.size(-1))
+            if has_components:
+                comp_stack.append(arg.size(-2))
+                batch_dims.append(arg.shape[:-2])
+            else:
+                batch_dims.append(arg.shape[:-1])
+            new_args.append(arg.to(dtype) if dtype is not None else arg)
+        elif arg_type == 'prob':
+            if arg.dim() < 1:
+                raise DimError(f"""
+                `{name}` should be a 1-dim vectors (+ optional leading batch dimensions),
+                 got `{name}.dim()={arg.dim()}`
+                """)
+            if (arg < -tol).any() or (arg.sum(-1) < 1-tol).any() or (arg.sum(-1) > 1+tol).any():
+                raise ValueError(f"""
+                `{name}` is expected to be a valid probability vector with positive entries that sum up to 1.
+                """)
+            comp_stack.append(arg.size(-1))
+            batch_dims.append(arg.shape[:-1])
+            new_args.append(arg.to(dtype) if dtype is not None else arg)
+        elif arg_type in ['spd', 'spsd', 'pd', 'psd']:
+            if arg.dim() < 2 + int(has_components):
+                raise DimError(f"""
+                `{name}` should be a 2-dim matrix {'with a leading component dimension' if has_components else ''}
+                 (+ optional leading batch dimensions), got `{name}.dim()`={arg.dim()}.
+                 """)
 
-# ******************************************************************************************************************** #
+            if arg_type[0] == 's' and not is_symmetric(arg).all():
+                raise ValueError(f"""
+                `{name}` should be symmetric. Found {~is_symmetric(arg).int().sum().item()} non-symmetric matrices.
+                """)
+            strict = 's' not in (arg_type[1:] if arg_type[0] == 's' else arg_type)
+            semi = '' if strict else 'semi '
+            if not is_pd(arg, strict=strict):
+                if make_pd:
+                    arg, val = make_psd(arg, strict=strict, return_correction=True)
+                    if verbose:
+                        warnings.warn(f"""
+                        `{name}` is not positive {semi}definite. Adding a small value to the 
+                        diagonal (<{val.max().item():.2e}) to ensure the matrices are positive {semi}definite
+                        """)
+                else:
+                    raise ValueError(f"""
+                    `{name}` should be symmetric and positive {semi}definite. Use `make_pd=True` to automatically add
+                     a small value to the matrix diagonals.
+                    """)
+            new_args.append(arg.to(dtype) if dtype is not None else arg)
+            dim_stack.extend([arg.size(-2), arg.size(-1)])
+            if 'prob' in args:
+                comp_stack.append(arg.size(-3))
+                batch_dims.append(arg.shape[:-3])
+            else:
+                batch_dims.append(arg.shape[:-2])
 
+        def all_equal(iterable):
+            if len(dim_stack) < 2: return True
+            g = groupby(iterable)
+            return next(g, True) and not next(g, False)
 
-def _compute_transport_diag_stochastic(
-        cov_source: Tensor,
-        cov_target: Tensor,
-        p_gstar: float
-) -> Tuple[Tensor, Optional[Tensor]]:
-    """
-    Helper function for `compute_transport_operators`.
-    This function doesn't have any parameter checking and was not designed to be standalone.
-    Use with care.
-    """
-    T_star = torch.sqrt(cov_source / cov_target + STABILITY_CONST)
-
-    # Compute SVD pseudo-inverse of `cov_source`
-    pinv_source = cov_source.clone()
-    pinv_source[pinv_source > STABILITY_CONST] = 1 / pinv_source[pinv_source > STABILITY_CONST]
-    pinv_source[pinv_source <= STABILITY_CONST] = 0
-
-    T = (1 - p_gstar) * torch.sqrt(cov_target * cov_source) * pinv_source + p_gstar
-    var_w = sqrt(1 - p_gstar) * cov_target * (1 - cov_target * pinv_source * T_star ** 2)
-    return T, var_w
-
-
-# ******************************************************************************************************************** #
-
-
-def _compute_transport_full_mat(
-        cov_source: Tensor,
-        cov_target: Tensor,
-        p_gstar: float
-) -> Tuple[Tensor, Optional[Tensor]]:
-    """
-    Helper function for `compute_transport_operators`.
-    This function doesn't have any parameter checking and was not designed to be standalone.
-    Use with care.
-    """
-    sqrtCs, isqrtCs = sqrtm(cov_source), invsqrtm(cov_source + STABILITY_CONST * eye_like(cov_source))
-    T = (1 - p_gstar) * (isqrtCs @ sqrtm(sqrtCs @ cov_target @ sqrtCs) @ isqrtCs) + p_gstar * eye_like(cov_source)
-    return T, None
-
-
-# ******************************************************************************************************************** #
-
-
-def _compute_transport_full_mat_stochastic(
-        cov_source: Tensor,
-        cov_target: Tensor,
-        pg_star: float
-) -> Tuple[Tensor, Tensor]:
-    """
-    Helper function for `compute_transport_operators`.
-    This function doesn't have any parameter checking and was not designed to be standalone.
-    Use with care.
-    """
-    Identity = eye_like(cov_source)
-    pinv_source = torch.linalg.pinv(cov_source)
-    sqrt_target, inv_sqrt_target = sqrtm(cov_target), invsqrtm(cov_target + STABILITY_CONST * Identity)
-
-    # Roles are swapped on purpose, cov_source might only be positive semi definite
-    T_star = _compute_transport_full_mat(cov_source=cov_target, cov_target=cov_source, p_gstar=0)[0]
-
-    T = (1-pg_star) * (sqrt_target @ sqrtm(sqrt_target @ cov_source @ sqrt_target) @ inv_sqrt_target @ pinv_source) + pg_star * Identity
-    Cw = sqrt(1-pg_star) * sqrt_target @ (Identity - sqrt_target @ T_star @ pinv_source @ T_star @ sqrt_target) @ sqrt_target
-    return T, Cw
+        if not all_equal(dim_stack):
+            raise DimError(f"""
+            All the inputs dimensionalities should match, got {dim_stack}
+            """)
+        if not all_equal(batch_dims):
+            raise DimError(f"""
+            All the inputs leading batch dimensions should match, got {batch_dims}
+            """)
+        if not all_equal(comp_stack):
+            raise DimError(f"""
+            All the inputs component dimension should match, got {batch_dims}
+            """)
+    return tuple(new_args)
