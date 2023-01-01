@@ -65,7 +65,7 @@ jobs:
 
     - name: Tests
       run: |
-        coverage run --source ot_vae_lightning -m pytest ot_vae_lightning tests -v --junitxml=junit/test-results-${{ runner.os }}-${{ matrix.python-version }}.xml
+        coverage run --source ot_vae_lightning -m pytest tests -v --junitxml=junit/test-results-${{ runner.os }}-${{ matrix.python-version }}.xml
 
     - name: Statistics
       if: success()
