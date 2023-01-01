@@ -1,0 +1,5 @@
+trainer:
+  devices: auto
+  strategy: ddp_find_unused_parameters_false
+  gradient_clip_val: 1.0
+  precision: 16

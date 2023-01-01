@@ -1,0 +1,41 @@
+seed_everything: 42
+trainer:
+#  val_check_interval: 1  # can be fraction
+#  amp_backend: apex  # need to install apex separately
+  logger:
+    class_path: pytorch_lightning.loggers.WandbLogger
+    init_args:
+      project: ot-vae-lightning
+      entity: gip
+      dir: vae
+      log_model: true
+      name: imagenet-ae-256x7x7
+model:
+  autoencoder:
+    class_path: ot_vae_lightning.networks.AutoEncoder
+    init_args:
+      in_features: 3
+      in_resolution: 224
+      latent_features: 256
+      latent_resolution: 7
+      double_encoded_features: false
+      capacity: 32
+      n_layers: 2
+      down_up_sample: 2
+      normalization: batch
+      activation: leaky
+      equalized_lr: 1
+      dropout: 0.
+      residual: add
+      time_embed_dim: null
+      max_attn_res: 0
+      bias: true
+data:
+  class_path: ot_vae_lightning.data.ImageNet224
+  init_args:
+    test_val_split: 0.9
+    seed: 42
+    train_batch_size: 50
+    val_batch_size: 50
+    test_batch_size: 50
+    num_workers: 10
