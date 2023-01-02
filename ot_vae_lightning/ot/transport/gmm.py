@@ -22,7 +22,7 @@ from torch.types import _size, _device, _dtype  # noqa
 
 from pytorch_lightning.utilities import rank_zero_warn
 from ot_vae_lightning.ot.transport.base import TransportOperator
-from ot_vae_lightning.ot.w2_utils import batch_w2_gmm_diag, gaussian_barycenter_diag
+from ot_vae_lightning.ot.w2_utils import batch_ot_gmm, gaussian_barycenter
 from ot_vae_lightning.ot.transport import compute_transport_operators, apply_transport
 from ot_vae_lightning.ot.gmm_distribution import GaussianMixtureModel
 
@@ -31,7 +31,7 @@ __all__ = ['GMMTransport']
 
 class GMMTransport(TransportOperator):
     r"""
-    Computes an upper bound[2] on the entropy-regularized squared W2 distance[1] between the following gaussian mixtures:
+    Computes an upper bound[2] on the entropy-regularized squared W2 distance[1] between the following gaussian mixtures
 
     .. math::
 
@@ -65,8 +65,6 @@ class GMMTransport(TransportOperator):
         :param make_pd: Add the minimum eigenvalue in order to make matrices pd, if needed
         """
         super().__init__()
-        if not diag: raise ValueError(f"`diag=False` not yet supported")
-
         self.dim = dim
         self.transport_type = transport_type
         self.pg_star = pg_star
@@ -122,13 +120,15 @@ class GMMTransport(TransportOperator):
         self.gmm_source.fit(self._source_features)
         self.gmm_target.fit(self._target_features)
 
-        total_cost, coupling = batch_w2_gmm_diag(
+        total_cost, coupling = batch_ot_gmm(
             self.gmm_source.means,
             self.gmm_target.means,
             self.gmm_source.variances,
             self.gmm_target.variances,
+            self.diag,
             self.gmm_source.weights,
             self.gmm_target.weights,
+            verbose=True,
             max_iter=100
         )
 
@@ -140,20 +140,25 @@ class GMMTransport(TransportOperator):
         if flattened.dim() != 2 or flattened.size(1) != self.dim:
             ValueError(f"`inputs` flattened is expected to have dimensionality equaled to {self.dim}")
 
-        assignments = self.gmm_source.predict(inputs)  # [N,]
-        source_means = self.gmm_source.means[assignments]  # [N, dim]
-        source_vars = self.gmm_source.variancesiances[assignments]  # [N, dim]
+        assignments = self.gmm_source.predict(inputs)                                       # [N,]
+        source_means = self.gmm_source.means[assignments]                                   # [N, dim]
+        source_vars = self.gmm_source.variances[assignments]                                # [N, dim] or [N, dim, dim]
+        target_assignments_probs = self._transport_matrix[assignments]                      # [N, n_components_target]
 
-        target_assignments_probs = self._transport_matrix[assignments]  # [N, n_components_target]
         if self.transport_type == 'sample':
-            target_assignments = Categorical(target_assignments_probs.softmax(-1)).sample()  # [N,]
-            target_means = self.gmm_target.means[target_assignments]  # [N, dim]
-            target_vars = self.gmm_target.variancesiances[target_assignments]  # [N, dim]
+            target_assignments = Categorical(target_assignments_probs.softmax(-1)).sample() # [N,]
+            target_means = self.gmm_target.means[target_assignments]                        # [N, dim]
+            target_vars = self.gmm_target.variances[target_assignments]                     # [N, dim] or [N, dim, dim]
+
         elif self.transport_type == 'barycenter':
             # [N, n_components_target] x [n_components_target, dim] --> [N, dim]
-            target_means, target_vars = gaussian_barycenter_diag(
-                self.gmm_target.means, self.gmm_target.variances, target_assignments_probs
+            target_means, target_vars = gaussian_barycenter(
+                self.gmm_target.means,
+                self.gmm_target.variances,
+                target_assignments_probs,
+                diag=self.diag
             )
+
         else: raise NotImplementedError()
 
         transport_operator, cov_stochastic_noise = compute_transport_operators(

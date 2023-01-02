@@ -12,6 +12,8 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 ************************************************************************************************************************
 """
 import functools
+import numpy as np
+
 import torch.nn as nn
 import torch.nn.utils.parametrize as P
 
@@ -42,7 +44,7 @@ class EqualizedLR(nn.Module):
 
     def forward(self, weight: nn.Parameter) -> nn.Parameter:
         if self.is_bias: return weight * self.lr_multiplier
-        fan_in = weight.data.size(1) * weight.data[0][0].numel()
+        fan_in = weight.data.size(0) if weight.dim() < 2 else np.prod(weight.shape[1:])
         return weight * self.lr_multiplier * self.gain / fan_in ** 0.5
 
 

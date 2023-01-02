@@ -73,7 +73,7 @@ def compute_transport_operators(
     # TL;DR
     # @theoad: Sorry for the spaghetti function. Error checking is better this way than with modular calls.
     # Parameter validation is done in this wrapper function and actual computations are done in modular calls.
-
+    # TODO: Add test
     # ----------------------------------------- PARAMETER CHECKS + BROADCAST ----------------------------------------- #
     if not 0 <= pg_star <= 1:
         raise ValueError(f"pg_star must be in the interval [0, 1], got {pg_star}")
@@ -279,6 +279,7 @@ def apply_transport(
 
     :return: T (input - mean_source) + mean_target + W,   W~Normal(0, Cw). [N, D2]
     """
+    # TODO: Add test
     # ----------------------------------------------- PARAMETER CHECKS ----------------------------------------------- #
     if dtype is not None:
         if input.dtype != dtype: input = input.to(dtype=dtype)

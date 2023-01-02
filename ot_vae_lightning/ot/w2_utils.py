@@ -12,20 +12,22 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 ************************************************************************************************************************
 """
 from itertools import groupby
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional
 
 import torch
 from torch import Tensor
 from torch.types import _dtype
 import warnings
 from ot_vae_lightning.ot.matrix_utils import *
+from pytorch_lightning.utilities import rank_zero_info
 
 __all__ = [
     'w2_gaussian',
     'batch_w2_dissimilarity_gaussian_diag',
-    'batch_w2_gmm_diag',
+    'batch_w2_dissimilarity_gaussian',
+    'batch_ot_gmm',
     'sinkhorn_log',
-    'gaussian_barycenter_diag'
+    'gaussian_barycenter'
 ]
 
 # ******************************************************************************************************************** #
@@ -53,7 +55,10 @@ def w2_gaussian(
     :return: The squared Wasserstein 2 distance between N(mean_source, cov_source) and N(mean_target, cov_target)
     """
     mean_source, mean_target, cov_source, cov_target = validate_args(  # noqa
-        mean_source, 'mean_source', 'vec', mean_target, 'mean_target', 'vec', cov_source, 'cov_source', 'spd', cov_target, 'cov_target', 'spd',
+        mean_source, 'mean_source', 'vec',
+        mean_target, 'mean_target', 'vec',
+        cov_source, 'cov_source', 'spd',
+        cov_target, 'cov_target', 'spd',
         make_pd=make_pd, verbose=verbose, dtype=torch.double
     )
 
@@ -85,8 +90,8 @@ def batch_w2_dissimilarity_gaussian_diag(
 
     .. math::
 
-        D_{bij} = W^{2}_{2}(\mathcal{N}(\mu_{bi}^{s} , \sigma_{bi}^{s}^{2}),
-         \mathcal{N}(\mu_{bj}^{t} , \sigma_{bj}^{t}^{2}))
+        D_{bij} = W^{2}_{2}(\mathcal{N}(\mu_{bi}^{s} , \mathbf{I} \sigma_{bi}^{s}^{2}),
+         \mathcal{N}(\mu_{bj}^{t} , \mathbf{I} \sigma_{bj}^{t}^{2}))
 
     :param mean_source: means of source distributions. [*, N, D]
     :param mean_target: means of target distributions. [*, M, D]
@@ -103,8 +108,8 @@ def batch_w2_dissimilarity_gaussian_diag(
 
     )
     mean_target, var_target = validate_args(  # noqa
-        mean_target, 'mean_source', 'vec',
-        var_target, 'var_source', 'var',
+        mean_target, 'mean_target', 'vec',
+        var_target, 'var_target', 'var',
         dtype=dtype
     )
 
@@ -127,13 +132,73 @@ def batch_w2_dissimilarity_gaussian_diag(
 # ******************************************************************************************************************** #
 
 
-def batch_w2_gmm_diag(
+def batch_w2_dissimilarity_gaussian(
         mean_source: Tensor,
         mean_target: Tensor,
-        var_source: Tensor,
-        var_target: Tensor,
+        cov_source: Tensor,
+        cov_target: Tensor,
+        make_pd: bool = False,
+        verbose: bool = False,
+        dtype: Optional[_dtype] = torch.double,
+) -> Tensor:
+    r"""
+    Computes the dissimilarity matrix:
+
+    .. math::
+
+        D_{bij} = W^{2}_{2}(\mathcal{N}(\mu_{bi}^{s} , \Sigma_{bi}^{s}^{2}),
+         \mathcal{N}(\mu_{bj}^{t} , \Sigma_{bj}^{t}^{2}))
+
+    :param mean_source: means of source distributions. [*, N, D]
+    :param mean_target: means of target distributions. [*, M, D]
+    :param cov_source: covariance matrix of source distribution. [*, N, D, D]
+    :param cov_target: covariance matrix of target distribution. [*, M, D, D]
+    :param dtype: The type from which the result will be computed.
+    :param make_pd: If ``True``, corrects matrices needed to be PD or PSD with by adding their minimum eigenvalue to
+                    their diagonal.
+    :param verbose: If ``True``, warns about correction value added to the diagonal of the matrices
+
+    :return: Dissimilarity matrix D [*, N, M] where D[b, i, j] = W2(Sbi, Tbj).
+    """
+    mean_source, cov_source = validate_args(  # noqa
+        mean_source, 'mean_source', 'vec',
+        cov_source, 'cov_source', 'spd',
+        dtype=dtype
+    )
+
+    mean_target, cov_target = validate_args(  # noqa
+        mean_target, 'mean_target', 'vec',
+        cov_target, 'cov_target', 'spd',
+        dtype=dtype
+    )
+
+    N, M, D = mean_source.size(-2), mean_target.size(-2), mean_source.size(-1)
+    if verbose: rank_zero_info(f"got {N} source components and {M} target components")
+
+    ones = [1] * (mean_source.dim()-2)
+    dissimilarity = w2_gaussian(
+        mean_source.repeat_interleave(M, -2),           # [*, N*M, D]  [1,1,1,1,2,2,2,2,3...]
+        mean_target.repeat(*ones, N, 1),                # [*, M*N, D]  [1,2,3,4,1,2,3,4,1...]
+        cov_source.repeat_interleave(M, -3),            # [*, N*M, D, D]
+        cov_target.repeat(*ones, N, 1, 1),              # [*, M*N, D, D]
+        make_pd=make_pd, verbose=verbose, dtype=dtype
+    )  # [*, N*M, N*M]  [11, 12, 13, 14, 21, 22, 23, 24,...]
+    dissimilarity = dissimilarity.view(*mean_source.shape[:-2], N, M)
+    return dissimilarity
+
+
+# ******************************************************************************************************************** #
+
+
+def batch_ot_gmm(
+        mean_source: Tensor,
+        mean_target: Tensor,
+        cov_source: Tensor,
+        cov_target: Tensor,
+        diag: bool,
         weight_source: Optional[Tensor] = None,
         weight_target: Optional[Tensor] = None,
+        verbose: bool = False,
         dtype: Optional[_dtype] = torch.double,
         **sinkhorn_kwargs
 ) -> Tuple[Tensor, Tensor]:
@@ -153,34 +218,54 @@ def batch_w2_gmm_diag(
 
     :param mean_source: batch of means of source distributions. [*, N, D]
     :param mean_target: batch of means of target distributions. [*, M, D]
-    :param var_source: batch of vars of source distribution (scale). [*, N, D]
-    :param var_target: batch of vars of target distribution (scale). [*, M, D]
+    :param cov_source: covariance matrix of source distribution. [*, N, D, D] ([*, N, D] if `diag=True`)
+    :param cov_target: covariance matrix of source distribution. [*, M, D, D] ([*, N, D] if `diag=True`)
+    :param diag: If ``True`` expects variance vectors instead of covariance matrices
     :param weight_source: Probability vector of source GMM distribution. [*, N]
     :param weight_target: Probability vector of target GMM distribution. [*, M]
+    :param verbose: If ``True``, warns about correction value added to the diagonal of the matrices
     :param dtype: The type from which the result will be computed.
 
     :return: Total W2 cost between GMMs and GMMt SUM_{i,j} cost(i, j) * pi(i, j)
              Coupling matrix pi [*, N, M]
     """
-    weight_source = weight_source or torch.ones_like(mean_source.select(dim=-1, index=0)) / mean_source.size(-2)
-    weight_target = weight_target or torch.ones_like(mean_target.select(dim=-1, index=0)) / mean_target.size(-2)
+    weight_source = torch.ones_like(mean_source.select(dim=-1, index=0)) / mean_source.size(-2) \
+        if weight_source is None else weight_source
+    weight_target = torch.ones_like(mean_target.select(dim=-1, index=0)) / mean_target.size(-2) \
+        if weight_target is None else weight_target
 
-    mean_source, var_source, weight_source = validate_args(  # noqa
+    mean_source, cov_source, weight_source = validate_args(  # noqa
         mean_source, 'mean_source', 'vec',
-        var_source, 'var_source', 'var',
+        cov_source, 'cov_source', 'var' if diag else 'spd',
         weight_source, 'weight_source', 'prob',
         dtype=dtype
     )
 
-    mean_target, var_target, weight_target = validate_args(  # noqa
+    mean_target, cov_target, weight_target = validate_args(  # noqa
         mean_target, 'mean_target', 'vec',
-        var_target, 'var_target', 'var',
+        cov_target, 'cov_target', 'var' if diag else 'spd',
         weight_target, 'weight_target', 'prob',
         dtype=dtype
     )
 
-    cost_matrix = batch_w2_dissimilarity_gaussian_diag(mean_source, mean_target, var_source, var_target)
-    coupling = sinkhorn_log(weight_source, weight_target, cost_matrix/cost_matrix.max(), **sinkhorn_kwargs)
+    if verbose: rank_zero_info("computing cost matrix...")
+
+    if diag:
+        cost_matrix = batch_w2_dissimilarity_gaussian_diag(
+            mean_source, mean_target, cov_source, cov_target, dtype=dtype
+        )
+    else:
+        cost_matrix = batch_w2_dissimilarity_gaussian(
+            mean_source, mean_target, cov_source, cov_target,
+            make_pd=True, verbose=verbose, dtype=dtype
+        )
+
+    if verbose: rank_zero_info("cost matrix computed:", cost_matrix)
+
+    max_per_mat = cost_matrix.max(-2, keepdim=True)[0].max(-1, keepdim=True)[0]
+    coupling = sinkhorn_log(
+        weight_source, weight_target, cost_matrix/max_per_mat, **sinkhorn_kwargs
+    )
 
     # elem-wise multiplication and sum => SUM cost(i,j) pi(i, j)
     total_cost = torch.sum(cost_matrix * coupling, dim=(-2, -1))
@@ -195,13 +280,13 @@ def sinkhorn_log(
         b: Tensor,
         C: Tensor,
         reg: float = 1e-5,
-        max_iter: int = 10,
-        threshold: float = 1e-2,
+        max_iter: int = 1000,
+        threshold: float = STABILITY_CONST,
 ) -> Tensor:
     r"""
     W2 Optimal Transport under entropic regularisation using fixed point sinkhorn iteration [1]
     in log domain for increased numerical stability.
-    Inspired from `Wohlert <httweight_source://gist.github.com/wohlert/8589045ab544082560cc5f8915cc90bd>`_'s
+    Inspired from `Wohlert <http://gist.github.com/wohlert/8589045ab544082560cc5f8915cc90bd>`_'s
     implementation.
 
     [1] Marco Cuturi, Sinkhorn Distances: Lightspeed Computation of Optimal Transport
@@ -215,42 +300,37 @@ def sinkhorn_log(
 
     :return: Coupling matrix (optimal transport plan). [*, N, M]
     """
-    def log_boltzmann_kernel(K: Tensor, u: Tensor, v: Tensor):
-        return (u.unsqueeze(-1) + v.unsqueeze(-2) - K) / reg
-
     u = torch.zeros_like(a)
     v = torch.zeros_like(b)
+    log_a = torch.log(a + STABILITY_CONST)
+    log_b = torch.log(b + STABILITY_CONST)
+    Cr = - C / reg
 
     for i in range(max_iter):
         u0, v0 = u, v
 
-        # u^{l+1} = a / (K v^l)
-        K = log_boltzmann_kernel(C, u, v)
-        u_ = torch.log(a + STABILITY_CONST) - torch.logsumexp(K, dim=-1)
-        u = reg * u_ + u
-
-        # v^{l+1} = b / (K^T u^(l+1))
-        K = log_boltzmann_kernel(C, u, v).transpose(-2, -1)
-        v_ = torch.log(b + STABILITY_CONST) - torch.logsumexp(K, dim=-1)
-        v = reg * v_ + v
+        # v^{l+1} = b / (K^T u^(l+1)), u^{l+1} = a / (K v^l)
+        v = log_b - torch.logsumexp(Cr + u.unsqueeze(-1), dim=-2)
+        u = log_a - torch.logsumexp(Cr + v.unsqueeze(-2), dim=-1)
 
         diff = torch.sum(torch.abs(u - u0), dim=-1) + torch.sum(torch.abs(v - v0), dim=-1)
-        if torch.min(diff).item() < threshold:
-            break
+        if torch.min(diff).item() < threshold: break
 
     # Transport plan pi = diag(a)*K*diag(b)
-    K = log_boltzmann_kernel(C, u, v)
-    pi = torch.exp(K)
+    pi = torch.exp(u.unsqueeze(-1) + v.unsqueeze(-2) + Cr)
     return pi
 
 
 # ******************************************************************************************************************** #
 
 
-def gaussian_barycenter_diag(
+def gaussian_barycenter(
         mean: Tensor,
-        var: Tensor,
-        weights: Tensor
+        cov: Tensor,
+        weights: Tensor,
+        diag: bool,
+        n_iter: int = 100,
+        dtype: Optional[_dtype] = torch.double
 ) -> Tuple[Tensor, Tensor]:
     r"""
     Computes the W2 Barycenter of the Gaussian distributions Normal(MU[i], diagC[i]) with weight weight_source[i]
@@ -266,20 +346,45 @@ def gaussian_barycenter_diag(
     A fixed-point approach to barycenters in Wasserstein space
 
     :param mean: mean components. [*, N, D]
-    :param var: vars components. [*, N, D]
+    :param cov: covariance components. [*, N, D, D] ([*, N, D] if `diag==True`)
     :param weights: Batch of probability vector. [*, N]
+    :param diag: If ``True`` expects variance vectors instead of covariance matrices
+    :param n_iter: number of fixed points iterations when `diag == False`
+    :param dtype: The type from which the result will be computed.
 
-    :return: :math: `\mu_{barycenter}, \sigma_{barycenter}^2`
+    :return: :math: `\mu_{barycenter}, \sigma_{barycenter}^2` [*, D], [*, D, D] (or [*, D] if `diag==True`)
     """
-    mean, var, weights = validate_args(  # noqa
+    mean, cov, weights = validate_args(  # noqa
         mean, 'mean', 'vec',
-        var, 'var', 'var',
-        weights, 'weights', 'prob'
+        cov, 'cov', 'var' if diag else 'spd',
+        weights, 'weights', 'prob',
+        dtype=dtype
     )
 
-    mean_b = weights @ mean
-    var_b = (weights @ torch.sqrt(var)) ** 2
-    return mean_b, var_b
+    # aggregate the means
+    weights = weights.unsqueeze(-2)                            # [*, N]    (unsqueeze) --> [*, 1, N]
+    mean_b = (weights @ mean)                                  # [*, 1, N] x [*, N, D] --> [*, 1, D]
+    mean_b = mean_b.squeeze(-2)                                # [*, 1, D]   (squeeze) --> [*, D]
+
+    # compute the covariance
+    if diag:
+        cov_b = (weights @ torch.sqrt(cov)) ** 2               # [*, 1, N] x [*, N, D] --> [*, 1, D]
+        cov_b = cov_b.squeeze(-2)                              # [*, 1, D]   (squeeze) --> [*, D]
+        return mean_b, cov_b
+
+    weights = weights.squeeze(-2).unsqueeze(-1).unsqueeze(-1)  # [*, 1, N] --> [*, N, 1, 1]
+
+    # init with randomly drawn cov
+    random_idx = torch.randint(size=(1,), high=cov.size(-3)).item()
+    cov_b = cov.select(dim=-3, index=random_idx)               # [*, N, D, D] (select) --> [*, D, D]
+    cov_b = cov_b.unsqueeze(-3)                                # [*, D, D] (unsqueeze) --> [*, 1, D, D]
+    for _ in range(n_iter):
+        sqrt_cov_b = sqrtm(cov_b)
+        mix = sqrt_cov_b @ cov @ sqrt_cov_b                    # [*, 1, D, D] x  [*, N, D, D] x [*, 1, D, D]
+        cov_b = (weights * sqrtm(mix)).sum(-3, keepdim=True)   # [*, 1, D, D] x. [*, N, D, D] (sum) --> [*, 1, D, D]
+    cov_b = cov_b.squeeze(-3)
+
+    return mean_b, cov_b
 
 
 # ******************************************************************************************************************** #
@@ -346,11 +451,11 @@ def validate_args(
 
             if arg_type[0] == 's' and not is_symmetric(arg).all():
                 raise ValueError(f"""
-                `{name}` should be symmetric. Found {~is_symmetric(arg).int().sum().item()} non-symmetric matrices.
+                `{name}` should be symmetric. Found {(~is_symmetric(arg)).int().sum().item()} non-symmetric matrices.
                 """)
             strict = 's' not in (arg_type[1:] if arg_type[0] == 's' else arg_type)
             semi = '' if strict else 'semi '
-            if not is_pd(arg, strict=strict):
+            if not is_pd(arg, strict=strict).all():
                 if make_pd:
                     arg, val = make_psd(arg, strict=strict, return_correction=True)
                     if verbose:
@@ -378,14 +483,17 @@ def validate_args(
 
         if not all_equal(dim_stack):
             raise DimError(f"""
-            All the inputs dimensionalities should match, got {dim_stack}
+            All the inputs dimensionalities should match,
+            got {dim_stack}
             """)
-        if not all_equal(batch_dims):
+        if not all_equal(batch_dims) and torch.broadcast_shapes(*batch_dims) not in batch_dims:  # allow for broadcast
             raise DimError(f"""
-            All the inputs leading batch dimensions should match, got {batch_dims}
+            All the inputs leading batch dimensions should be broadcastable,
+            got {batch_dims}
             """)
         if not all_equal(comp_stack):
             raise DimError(f"""
-            All the inputs component dimension should match, got {batch_dims}
+            All the inputs component dimension should match,
+            got {batch_dims}
             """)
     return tuple(new_args)

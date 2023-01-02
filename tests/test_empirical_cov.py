@@ -1,7 +1,7 @@
 """
 ************************************************************************************************************************
 
-`PyTorch Lightning <https://www.pytorchlightning.ai/>`_ implementation of a CI for empirical covariance computation
+`PyTorch <https://pytorch.org/>`_ implementation of a CI for empirical covariance computation
 
 Implemented by: `Theo J. Adrai <https://github.com/theoad>`_
 

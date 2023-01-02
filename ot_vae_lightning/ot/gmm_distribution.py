@@ -54,7 +54,8 @@ class GaussianMixtureModel(nn.Module):
 
     @property
     def variances(self) -> Tensor:
-        return self.distribution.component_distribution.covariance_matrix if self.diag else self.distribution.component_distribution.variance
+        return self.distribution.component_distribution.variance \
+            if self.diag else self.distribution.component_distribution.covariance_matrix
 
     @property
     def distribution(self) -> D.MixtureSameFamily:
