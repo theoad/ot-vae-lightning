@@ -147,15 +147,15 @@ class VAE(VisionModule):
         if self.prior is not None: param_list.append(self.prior.parameters())
         return filter(lambda p: p.requires_grad, itertools.chain(*param_list))
 
-    # def configure_optimizers(self):
-    #     opt = torch.optim.Adam(
-    #         self.optim_parameters(), lr=1e-3, betas=(0.9, 0.999)
-    #     )
-    #     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #         opt, mode=self.mode, factor=0.75, patience=8, verbose=True, threshold=1e-1, min_lr=1e-6
-    #     )
-    #     lr_scheduler = {"scheduler": scheduler, "monitor": self.monitor}
-    #     return {"optimizer": opt, "lr_scheduler": lr_scheduler}
+    def configure_optimizers(self):
+        opt = torch.optim.Adam(
+            self.optim_parameters(), lr=1e-3, betas=(0.9, 0.999)
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode=self.mode, factor=0.75, patience=8, verbose=True, threshold=1e-1, min_lr=1e-6
+        )
+        lr_scheduler = {"scheduler": scheduler, "monitor": self.monitor}
+        return {"optimizer": opt, "lr_scheduler": lr_scheduler}
 
     def recon_loss(self, reconstructions: Tensor, target: Tensor, **kwargs) -> Tensor:
         return F.mse_loss(reconstructions, target)
