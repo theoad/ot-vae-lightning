@@ -11,15 +11,16 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
+from math import sqrt
 from itertools import groupby
 from typing import Tuple, Optional
 
 import torch
 from torch import Tensor
 from torch.types import _dtype
+import torch.distributions as D
 import warnings
 from ot_vae_lightning.ot.matrix_utils import *
-from pytorch_lightning.utilities import rank_zero_info
 
 __all__ = [
     'w2_gaussian',
@@ -27,7 +28,9 @@ __all__ = [
     'batch_w2_dissimilarity_gaussian',
     'batch_ot_gmm',
     'sinkhorn_log',
-    'gaussian_barycenter'
+    'gaussian_barycenter',
+    'compute_transport_operators',
+    'apply_transport'
 ]
 
 # ******************************************************************************************************************** #
@@ -54,7 +57,7 @@ def w2_gaussian(
 
     :return: The squared Wasserstein 2 distance between N(mean_source, cov_source) and N(mean_target, cov_target)
     """
-    mean_source, mean_target, cov_source, cov_target = validate_args(  # noqa
+    mean_source, mean_target, cov_source, cov_target = _validate_args(  # noqa
         mean_source, 'mean_source', 'vec',
         mean_target, 'mean_target', 'vec',
         cov_source, 'cov_source', 'spd',
@@ -65,7 +68,7 @@ def w2_gaussian(
     cov_target_sqrt = sqrtm(cov_target)
     mix = cov_target_sqrt @ cov_source @ cov_target_sqrt
 
-    mix, = validate_args(
+    mix, = _validate_args(
         mix, 'cov_target_sqrt @ cov_source @ cov_target_sqrt', 'spsd',
         make_pd=make_pd, verbose=verbose, dtype=dtype
     )
@@ -101,13 +104,13 @@ def batch_w2_dissimilarity_gaussian_diag(
 
     :return: Dissimilarity matrix D [*, N, M] where D[b, i, j] = W2(Sbi, Tbj).
     """
-    mean_source, var_source = validate_args(  # noqa
+    mean_source, var_source = _validate_args(  # noqa
         mean_source, 'mean_source', 'vec',
         var_source, 'var_source', 'var',
         dtype=dtype
 
     )
-    mean_target, var_target = validate_args(  # noqa
+    mean_target, var_target = _validate_args(  # noqa
         mean_target, 'mean_target', 'vec',
         var_target, 'var_target', 'var',
         dtype=dtype
@@ -160,20 +163,19 @@ def batch_w2_dissimilarity_gaussian(
 
     :return: Dissimilarity matrix D [*, N, M] where D[b, i, j] = W2(Sbi, Tbj).
     """
-    mean_source, cov_source = validate_args(  # noqa
+    mean_source, cov_source = _validate_args(  # noqa
         mean_source, 'mean_source', 'vec',
         cov_source, 'cov_source', 'spd',
         dtype=dtype
     )
 
-    mean_target, cov_target = validate_args(  # noqa
+    mean_target, cov_target = _validate_args(  # noqa
         mean_target, 'mean_target', 'vec',
         cov_target, 'cov_target', 'spd',
         dtype=dtype
     )
 
     N, M, D = mean_source.size(-2), mean_target.size(-2), mean_source.size(-1)
-    if verbose: rank_zero_info(f"got {N} source components and {M} target components")
 
     ones = [1] * (mean_source.dim()-2)
     dissimilarity = w2_gaussian(
@@ -234,21 +236,19 @@ def batch_ot_gmm(
     weight_target = torch.ones_like(mean_target.select(dim=-1, index=0)) / mean_target.size(-2) \
         if weight_target is None else weight_target
 
-    mean_source, cov_source, weight_source = validate_args(  # noqa
+    mean_source, cov_source, weight_source = _validate_args(  # noqa
         mean_source, 'mean_source', 'vec',
         cov_source, 'cov_source', 'var' if diag else 'spd',
         weight_source, 'weight_source', 'prob',
         dtype=dtype
     )
 
-    mean_target, cov_target, weight_target = validate_args(  # noqa
+    mean_target, cov_target, weight_target = _validate_args(  # noqa
         mean_target, 'mean_target', 'vec',
         cov_target, 'cov_target', 'var' if diag else 'spd',
         weight_target, 'weight_target', 'prob',
         dtype=dtype
     )
-
-    if verbose: rank_zero_info("computing cost matrix...")
 
     if diag:
         cost_matrix = batch_w2_dissimilarity_gaussian_diag(
@@ -260,12 +260,8 @@ def batch_ot_gmm(
             make_pd=True, verbose=verbose, dtype=dtype
         )
 
-    if verbose: rank_zero_info("cost matrix computed:", cost_matrix)
-
     max_per_mat = cost_matrix.max(-2, keepdim=True)[0].max(-1, keepdim=True)[0]
-    coupling = sinkhorn_log(
-        weight_source, weight_target, cost_matrix/max_per_mat, **sinkhorn_kwargs
-    )
+    coupling = sinkhorn_log(weight_source, weight_target, cost_matrix/max_per_mat, **sinkhorn_kwargs)
 
     # elem-wise multiplication and sum => SUM cost(i,j) pi(i, j)
     total_cost = torch.sum(cost_matrix * coupling, dim=(-2, -1))
@@ -354,7 +350,7 @@ def gaussian_barycenter(
 
     :return: :math: `\mu_{barycenter}, \sigma_{barycenter}^2` [*, D], [*, D, D] (or [*, D] if `diag==True`)
     """
-    mean, cov, weights = validate_args(  # noqa
+    mean, cov, weights = _validate_args(  # noqa
         mean, 'mean', 'vec',
         cov, 'cov', 'var' if diag else 'spd',
         weights, 'weights', 'prob',
@@ -390,10 +386,149 @@ def gaussian_barycenter(
 # ******************************************************************************************************************** #
 
 
-class DimError(Exception):
-    pass
+def compute_transport_operators(
+        cov_source: Tensor,
+        cov_target: Tensor,
+        stochastic: bool,
+        diag: bool,
+        pg_star: float = 0,
+        make_pd: bool = False,
+        verbose: bool = False,
+        dtype: Optional[_dtype] = torch.double
+) -> Tuple[Tensor, Tensor]:
+    r"""
+    Batch implementation of eq. 17, 19 in [1]
 
-def validate_args(
+    .. math::
+
+        (17) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{-0.5}_{s} (\Sigma^{0.5}_{s} \Sigma_{t}
+         \Sigma^{0.5}_{s})^{0.5} \Sigma^{-0.5}_{s} + P/G^{*} I
+
+        (19) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{+0.5}_{t} (\Sigma^{0.5}_{t} \Sigma_{s}
+         \Sigma^{0.5}_{t})^{0.5} \Sigma^{-0.5}_{t} \Sigma^{\dagger}_{s} + P/G^{*} I
+
+             \Sigma_w = \Sigma^{0.5}_{t} (I - \Sigma^{0.5}_{t} T^{*} \Sigma^{\dagger}_{s} T^{*}
+              \Sigma^{0.5}_{t}) \Sigma^{0.5}_{t},  T^{*} = T_{t \longrightarrow s} (17)
+
+    [1] D. Freirich, T. Michaeli and R. Meir.
+    `A Theory of the Distortion-Perception Tradeoff in Wasserstein Space <https://proceedings.neurips.cc/paper/2021/
+    hash/d77e68596c15c53c2a33ad143739902d-Abstract.html>`_
+
+    :param cov_source: Batch of SPD matrices. Source covariances. [*, D1, D1] (or [*, D1] if ``diag==True``)
+    :param cov_target: Batch of SPSD matrices. Target covariances. [*, D2, D2] (or [*, D2] if ``diag==True``)
+    :param stochastic: If ``True`` return (T_{s -> t}, \Sigma_w) of (19) else return (T_{s -> t}, `None`) (17)
+    :param diag: If ``True`` expects cov_source and cov_target to be batch of vectors (representing diagonal matrices)
+    :param pg_star: Perception-distortion ratio. can be seen as temperature.
+     (`p_gstar=0` --> best perception, `p_gstar=1` --> best distortion). Default `0`.
+    :param make_pd: If ``True``, corrects matrices needed to be PD or PSD with by adding their minimum eigenvalue to
+                their diagonal.
+    :param verbose: If ``True``, warns about correction value added to the diagonal of the matrices
+    :param dtype: The type from which the result will be computed.
+
+    :return: Batch of transport operators T_{s -> t} and \Sigma_w
+    """
+    if stochastic and diag: cov_source[cov_source < STABILITY_CONST] = 0
+    cov_source, cov_target = _validate_args(  # noqa
+        cov_source, 'cov_source', 'var' if diag else ('spsd' if stochastic else 'spd'),
+        cov_target, 'cov_target', 'var' if diag else ('spd' if stochastic else 'spsd'),
+        make_pd=make_pd, dtype=dtype, verbose=verbose
+    )
+
+    stochastic_warn = """
+    The noise covariance matrix is not positive definite. 
+    Falling back to the non-stochastic implementation
+    """
+
+    if diag and stochastic:
+        T, Cw = _compute_transport_diag_stochastic(cov_source, cov_target, pg_star)
+        if (Cw <= 0).any() and verbose: warnings.warn(stochastic_warn); stochastic = False
+
+    if diag and not stochastic:
+        T, Cw = _compute_transport_diag(cov_source, cov_target, pg_star)
+
+    if not diag and stochastic:
+        T, Cw = _compute_transport_full_mat_stochastic(cov_source, cov_target, pg_star)
+        if not is_spd(Cw, strict=True).all() and verbose: warnings.warn(stochastic_warn); stochastic = False
+
+    if not diag and not stochastic:
+        T, Cw = _compute_transport_full_mat(cov_source, cov_target, pg_star)
+
+    return T, Cw  # noqa
+
+
+# ******************************************************************************************************************** #
+
+
+def apply_transport(
+        input: Tensor,
+        mean_source: Tensor,
+        mean_target: Tensor,
+        T: Tensor,
+        Cw: Optional[Tensor] = None,
+        diag: bool = False,
+        make_pd: bool = False,
+        verbose: bool = False,
+        dtype: Optional[_dtype] = torch.double
+) -> Tensor:
+    r"""
+    Executes optimal W2 transport of the sample given as `input` using the provided mean and transport operators (T, Cw)
+    in batch fashion according to eq. 17 and eq. 19 in [1]
+
+    .. math::
+
+        (17) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{-0.5}_{s} (\Sigma^{0.5}_{s} \Sigma_{t}
+         \Sigma^{0.5}_{s})^{0.5} \Sigma^{-0.5}_{s} + P/G^{*} I
+
+        (19) T_{s \longrightarrow t} = (1 - P/G^{*}) \Sigma^{+0.5}_{t} (\Sigma^{0.5}_{t} \Sigma_{s}
+         \Sigma^{0.5}_{t})^{0.5} \Sigma^{-0.5}_{t} \Sigma^{\dagger}_{s} + P/G^{*} I
+
+             \Sigma_w = \Sigma^{0.5}_{t} (I - \Sigma^{0.5}_{t} T^{*} \Sigma^{\dagger}_{s} T^{*}
+              \Sigma^{0.5}_{t}) \Sigma^{0.5}_{t},  T^{*} = T_{t \longrightarrow s} (17)
+
+    [1] D. Freirich, T. Michaeli and R. Meir.
+    `A Theory of the Distortion-Perception Tradeoff in Wasserstein Space <https://proceedings.neurips.cc/paper/2021/
+    hash/d77e68596c15c53c2a33ad143739902d-Abstract.html>`_
+
+    :param input: Batch of samples from the source distribution, to transport to the target distribution. [*, D1]
+    :param mean_source: Mean of the source distribution. [*, D1]
+    :param mean_target: Mean of the target distribution. [*, D2]
+    :param T: transport Operator from the source to the target distribution. [*, D2, D1] (or [*, D1] if ``diag==True``)
+    :param Cw: Noise covariance if the source distribution is degenerate. [*, D2, D1] (or [*, D1] if ``diag==True``]
+    :param diag: If ``True`` expects T and Cw to be vectors (representing diagonal matrices)
+    :param make_pd: If ``True``, corrects matrices needed to be PD or PSD with by adding their minimum eigenvalue to
+                    their diagonal.
+    :param verbose: If ``True``, warns about correction value added to the diagonal of the matrices
+    :param dtype: The type from which the result will be computed.
+
+    :return: T (input - mean_source) + mean_target + W,   W~Normal(0, Cw). [*, D2]
+    """
+    ignore_cw = Cw is None or torch.allclose(Cw, torch.zeros_like(Cw))
+    input, mean_source, mean_target, T, Cw = _validate_args(  # noqa
+        input, 'input', 'vec',
+        mean_source, 'mean_source', 'vec',
+        mean_target, 'mean_target', 'vec',
+        T, 'T', 'vec' if diag else 'mat',
+        Cw, 'Cw', ('vec' if diag else 'mat') if ignore_cw else ('var' if diag else 'spd'),
+        make_pd=make_pd, verbose=verbose, dtype=dtype
+    )  # TODO: will raise false error if D1 != D2
+
+    x_centered = input - mean_source
+    x_transported = T * x_centered if diag else (T @ x_centered.unsqueeze(-1)).squeeze(-1)
+
+    x_transported = x_transported + mean_target
+
+    if not ignore_cw:
+        mu = torch.zeros_like(mean_target)
+        noise = D.Normal(mu, Cw) if diag else D.MultivariateNormal(mu, Cw)
+        x_transported += noise.sample()
+
+    return x_transported
+
+
+# ******************************************************************************************************************** #
+
+
+def _validate_args(
         *args,
         make_pd: bool = False,
         verbose: bool = False,
@@ -408,12 +543,12 @@ def validate_args(
     for arg, name, arg_type in zip(args[::3], args[1::3], args[2::3]):
         assert isinstance(name, str), "Flow assertion Error: name should be a string"
         if not isinstance(arg, Tensor):
-            raise DimError(f"""
+            raise ValueError(f"""
             `{name}` is expected to be a torch.Tensor, got `{type(arg)}` instead.
             """)
         if arg_type in ['vec', 'var']:
             if arg.dim() < 1 + int(has_components):
-                raise DimError(f"""
+                raise ValueError(f"""
                 `{name}` should be 1-dim vectors {'with a leading component dimension' if has_components else ''}
                 (+ optional leading batch dimensions), got `{name}.dim()={arg.dim()}`
                 """)
@@ -431,7 +566,7 @@ def validate_args(
             new_args.append(arg.to(dtype) if dtype is not None else arg)
         elif arg_type == 'prob':
             if arg.dim() < 1:
-                raise DimError(f"""
+                raise ValueError(f"""
                 `{name}` should be a 1-dim vectors (+ optional leading batch dimensions),
                  got `{name}.dim()={arg.dim()}`
                 """)
@@ -442,9 +577,9 @@ def validate_args(
             comp_stack.append(arg.size(-1))
             batch_dims.append(arg.shape[:-1])
             new_args.append(arg.to(dtype) if dtype is not None else arg)
-        elif arg_type in ['spd', 'spsd', 'pd', 'psd']:
+        elif arg_type in ['mat', 'spd', 'spsd', 'pd', 'psd']:
             if arg.dim() < 2 + int(has_components):
-                raise DimError(f"""
+                raise ValueError(f"""
                 `{name}` should be a 2-dim matrix {'with a leading component dimension' if has_components else ''}
                  (+ optional leading batch dimensions), got `{name}.dim()`={arg.dim()}.
                  """)
@@ -455,7 +590,7 @@ def validate_args(
                 """)
             strict = 's' not in (arg_type[1:] if arg_type[0] == 's' else arg_type)
             semi = '' if strict else 'semi '
-            if not is_pd(arg, strict=strict).all():
+            if 'pd' in arg_type and not is_pd(arg, strict=strict).all():
                 if make_pd:
                     arg, val = make_psd(arg, strict=strict, return_correction=True)
                     if verbose:
@@ -482,18 +617,103 @@ def validate_args(
             return next(g, True) and not next(g, False)
 
         if not all_equal(dim_stack):
-            raise DimError(f"""
+            raise ValueError(f"""
             All the inputs dimensionalities should match,
             got {dim_stack}
             """)
         if not all_equal(batch_dims) and torch.broadcast_shapes(*batch_dims) not in batch_dims:  # allow for broadcast
-            raise DimError(f"""
+            raise ValueError(f"""
             All the inputs leading batch dimensions should be broadcastable,
             got {batch_dims}
             """)
         if not all_equal(comp_stack):
-            raise DimError(f"""
+            raise ValueError(f"""
             All the inputs component dimension should match,
             got {batch_dims}
             """)
     return tuple(new_args)
+
+
+# ******************************************************************************************************************** #
+
+
+def _compute_transport_diag(
+        cov_source: Tensor,
+        cov_target: Tensor,
+        p_gstar
+) -> Tuple[Tensor, Tensor]:
+    """
+    Helper function for `compute_transport_operators`.
+    This function doesn't have any parameter checking and was not designed to be standalone.
+    Use with care.
+    """
+    T = (1 - p_gstar) * torch.sqrt(cov_target / cov_source + STABILITY_CONST) + p_gstar
+    return T, torch.zeros_like(T)
+
+
+# ******************************************************************************************************************** #
+
+
+def _compute_transport_diag_stochastic(
+        cov_source: Tensor,
+        cov_target: Tensor,
+        p_gstar: float
+) -> Tuple[Tensor, Tensor]:
+    """
+    Helper function for `compute_transport_operators`.
+    This function doesn't have any parameter checking and was not designed to be standalone.
+    Use with care.
+    """
+    T_star = torch.sqrt(cov_source / cov_target + STABILITY_CONST)
+
+    # Compute SVD pseudo-inverse of `cov_source`
+    pinv_source = cov_source.clone()
+    pinv_source[pinv_source > STABILITY_CONST] = 1 / pinv_source[pinv_source > STABILITY_CONST]
+    pinv_source[pinv_source <= STABILITY_CONST] = 0
+
+    T = (1 - p_gstar) * torch.sqrt(cov_target * cov_source) * pinv_source + p_gstar
+    var_w = sqrt(1 - p_gstar) * cov_target * (1 - cov_target * pinv_source * T_star ** 2)
+    return T, var_w
+
+
+# ******************************************************************************************************************** #
+
+
+def _compute_transport_full_mat(
+        cov_source: Tensor,
+        cov_target: Tensor,
+        p_gstar: float
+) -> Tuple[Tensor, Tensor]:
+    """
+    Helper function for `compute_transport_operators`.
+    This function doesn't have any parameter checking and was not designed to be standalone.
+    Use with care.
+    """
+    sqrtCs, isqrtCs = sqrtm(cov_source), invsqrtm(cov_source + STABILITY_CONST * eye_like(cov_source))
+    T = (1 - p_gstar) * (isqrtCs @ sqrtm(sqrtCs @ cov_target @ sqrtCs) @ isqrtCs) + p_gstar * eye_like(cov_source)
+    return T, torch.zeros_like(T)
+
+
+# ******************************************************************************************************************** #
+
+
+def _compute_transport_full_mat_stochastic(
+        cov_source: Tensor,
+        cov_target: Tensor,
+        pg_star: float
+) -> Tuple[Tensor, Tensor]:
+    """
+    Helper function for `compute_transport_operators`.
+    This function doesn't have any parameter checking and was not designed to be standalone.
+    Use with care.
+    """
+    Identity = eye_like(cov_source)
+    pinv_source = torch.linalg.pinv(cov_source)
+    sqrt_target, inv_sqrt_target = sqrtm(cov_target), invsqrtm(cov_target + STABILITY_CONST * Identity)
+
+    # Roles are swapped on purpose, cov_source might only be positive semi definite
+    T_star = _compute_transport_full_mat(cov_source=cov_target, cov_target=cov_source, p_gstar=0)[0]
+
+    T = (1 - pg_star) * (sqrt_target @ sqrtm(sqrt_target @ cov_source @ sqrt_target) @ inv_sqrt_target @ pinv_source) + pg_star * Identity
+    Cw = sqrt(1 - pg_star) * sqrt_target @ (Identity - sqrt_target @ T_star @ pinv_source @ T_star @ sqrt_target) @ sqrt_target
+    return T, Cw

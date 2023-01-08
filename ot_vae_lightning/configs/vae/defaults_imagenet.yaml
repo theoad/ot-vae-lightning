@@ -23,8 +23,8 @@ model:
       n_layers: 2
       down_up_sample: 2
       normalization: batch
-      activation: leaky
-      equalized_lr: 1
+      activation: relu
+      equalized_lr: null
       dropout: 0.
       residual: add
       time_embed_dim: null

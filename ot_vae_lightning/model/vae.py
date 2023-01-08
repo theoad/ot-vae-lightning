@@ -287,36 +287,60 @@ if __name__ == '__main__':
         run=False
     )
 
-    transforms = [
-        T.GaussianBlur(5, sigma=(2, 2)),
-        T.GaussianBlur(9, sigma=(4, 4)),
-        T.RandomErasing(p=1., scale=list(np.linspace(0.1, 2, 10)), ratio=list(np.linspace(0.01, 5, 10))),
-        T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
-        T.RandomPerspective(distortion_scale=0.25, p=1.),
-        T.RandomRotation(20),
-        T.Compose([T.Lambda(lambda t: (255 * t).type(torch.uint8)), T.RandAugment(5, 8), T.Lambda(lambda t: t.float() / 255)])
-    ]
+    transport_kwargs = dict(
+        transport_dims=(1,),
+        size=cli.model.latent_size,
+        transformations=T.GaussianBlur(9, sigma=(4, 4)),
+        source_latents_from_train=False,
+        target_latents_from_train=False,
+        unpaired=True,
+        verbose=True,
+        make_pd=True,
+        stochastic=False,
+        pg_star=0.,
+    )
 
     cli.trainer.callbacks += [
         LatentTransport(
-            transport_dims=(1,),
             transport_operator=GMMTransport,
-            logging_prefix=f"mat_per_needle_{utils.camel2snake(transform.__class__.__name__)}",
-            size=cli.model.latent_size,
-            transformations=transform,
-            source_latents_from_train=False,
-            target_latents_from_train=False,
-            unpaired=True,
-            verbose=True,
+            logging_prefix='gmm128x512-common-diag-barycenter-smooth',
             common_operator=True,
-            diag=False,
-            make_pd=True,
-            stochastic=True,
-            pg_star=0.,
+            diag=True,
+            n_components_source=128,
+            n_components_target=512,
+            transport_type='barycenter',
+            smooth_assignment=True,
+            **transport_kwargs
+        ),
+        LatentTransport(
+            transport_operator=GMMTransport,
+            logging_prefix='gmm128x512-common-diag-sample-hard',
+            common_operator=True,
+            diag=True,
+            n_components_source=128,
+            n_components_target=512,
+            transport_type='sample',
+            smooth_assignment=False,
+            **transport_kwargs
+        ),
+        LatentTransport(
+            transport_operator=GMMTransport,
+            logging_prefix='gmm16x64-common-diag-smooth',
+            common_operator=True,
+            diag=True,
             n_components_source=16,
             n_components_target=64,
-            transport_type='sample'
-        ) for transform in transforms
+            transport_type='barycenter',
+            smooth_assignment=True,
+            **transport_kwargs
+        ),
+        LatentTransport(
+            transport_operator=GaussianTransport,
+            logging_prefix='gaussian-deterministic',
+            common_operator=True,
+            diag=False,
+            **transport_kwargs
+        ),
     ]
 
     cli.trainer.fit(cli.model, cli.datamodule)

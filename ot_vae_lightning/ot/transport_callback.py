@@ -11,13 +11,11 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Optional, Any, Tuple, Dict, List, Type
-from itertools import accumulate
-from functools import partial
-from operator import mul
+from typing import Optional, Any, Tuple, Dict, List, Type, Literal
 
 import pytorch_lightning.utilities
 from numpy.random import permutation
+from numpy import prod
 
 import torch
 from torch import Tensor
@@ -52,9 +50,9 @@ class LatentTransport(Callback):
     def __init__(
             self,
             size: _size,
+            transport_dims: _size,
             transformations: callable,
             transport_operator: Type[TransportOperator] = GaussianTransport,
-            transport_dims: _size = (1, 2, 3),
             common_operator: bool = False,
             samples_key: str = 'samples',
             latents_key: str = 'latents',
@@ -95,17 +93,30 @@ class LatentTransport(Callback):
             Given `size`={size}. The inputs will have the {len(size) + 1} dimensions (with the batch dimensions). 
             Therefore `transport_dims` must be a subset of {all_dims}
             """)
-        self.size = size
-        self.transformations = transformations
-        self.transport_dims = transport_dims
-        self.common_operator = common_operator
-        self.dim = list(accumulate([size[i - 1] for i in self.transport_dims], mul))[-1]
 
-        operator_dim = list(set(all_dims).difference(set(self.transport_dims)))
-        self.num_operators = list(accumulate([size[i-1] for i in operator_dim], mul))[-1]\
-            if len(operator_dim) > 0 and not common_operator else 1
-        self._permute_and_flatten = partial(utils.permute_and_flatten, permute_dims=self.transport_dims, batch_first=False)
-        self._unflatten_and_unpermute = partial(utils.unflatten_and_unpermute, permute_dims=self.transport_dims, batch_first=False)
+        self.size = size
+        self.transport_dims = torch.Size(transport_dims)
+        self.batch_dims = torch.Size(list(set(all_dims).difference(set(self.transport_dims))))
+        self.transformations = transformations
+        self.common_operator = common_operator
+        self.event_shape = torch.Size([size[i - 1] for i in self.transport_dims])
+        self.batch_shape = torch.Size([size[i - 1] for i in self.batch_dims])
+        self.dim = int(prod(self.event_shape))
+        self.n = int(prod(self.batch_shape))
+        self.transport_operator = transport_operator(
+            dim=self.dim,
+            batch_shape=torch.Size([1 if self.common_operator else self.n]),
+            **transport_operator_kwargs
+        )
+
+        # prepare the permutation map to unpermute after transporting
+        permutation_map = list(range(len(self.size)+1))  # number of dims + batch dim
+        permutation_map[0] = len(self.batch_dims)        # real batch dim trails the operator dim
+        for dim in range(1, len(self.size)+1):
+            if dim in self.batch_dims: permutation_map[dim] = list(self.batch_dims).index(dim)
+            else: permutation_map[dim] = len(self.batch_dims) + 1 + self.transport_dims.index(dim)
+        self._unpermute_map = permutation_map
+
         self.unpaired = unpaired
         self.source_latents_from_train = source_latents_from_train
         self.target_latents_from_train = target_latents_from_train
@@ -129,18 +140,12 @@ class LatentTransport(Callback):
 
         self.test_metrics = None
 
-        self.transport_operators = torch.nn.ModuleList([
-            transport_operator(dim=self.dim, **transport_operator_kwargs)
-            for _ in range(self.num_operators)
-        ])
-
     def on_fit_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         self.test_metrics = pl_module.test_metrics.clone(prefix=self.logging_prefix)
-        self.transport_operators = self.transport_operators.to(pl_module.device)
+        self.transport_operator = self.transport_operator.to(pl_module.device)
 
     def on_train_epoch_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
-        for operator in self.transport_operators:
-            operator.reset()
+        self.transport_operator.reset()
 
     @torch.no_grad()
     def on_train_batch_end(
@@ -231,7 +236,7 @@ class LatentTransport(Callback):
             return
 
         # Compute the transport cost distance
-        mean_dist = self._val_dist()
+        mean_dist = self.transport_operator.compute().mean()
         pl_module.log(self.logging_prefix + 'avg_transport_cost', mean_dist, sync_dist=True)
         self._log_images(trainer, pl_module)
 
@@ -252,11 +257,76 @@ class LatentTransport(Callback):
         if self.test_metrics is not None:
             self.test_metrics.reset()
 
+    def _permute_and_flatten(self, latents: Tensor) -> Tensor:
+        # [B, C1, C2, H, W] --> [H, W, B, C1, C2]
+        latents = latents.permute(*self.batch_dims, 0, *self.transport_dims).contiguous()
+
+        # [H, W, B, C1, C2] --> [H*W, B, C1*C2]
+        latents = latents.view(self.n, -1, self.dim)
+
+        if self.common_operator:
+            # [H*W, B, C1*C2] --> [1, H*W*B, C1*C2]
+            latents = latents.view(1, -1, self.dim)
+
+        return latents
+
+    def _unflatten_and_unpermute(self, latents: Tensor) -> Tensor:
+        if self.common_operator:
+            # [1, H*W*B, C1*C2] --> [H*W, B, C1*C2]
+            latents = latents.view(self.n, -1, self.dim)
+
+        # [H*W, B, C1*C2] --> [H, W, B, C1, C2]
+        latents = latents.view(*self.batch_shape, -1, *self.event_shape)
+
+        # [B, H, W, C1, C2] --> [B, C1, C2, H, W]
+        latents = latents.permute(*self._unpermute_map).contiguous()
+
+        return latents
+
     def _update_transport_operators(self, latents: Tensor, source: bool) -> None:
-        latents_rearranged = self._permute_and_flatten(latents, flatten_batch=self.common_operator)
-        key = 'source_samples' if source else 'target_samples'
-        for latent, transport_operator in zip(latents_rearranged, self.transport_operators):
-            transport_operator.update(**{key: latent})
+        latents = self._permute_and_flatten(latents)
+        if source: self.transport_operator.update(source_samples=latents)
+        else: self.transport_operator.update(target_samples=latents)
+
+    def _transport(self, latents: Tensor) -> Tensor:
+        latents_transported = self._unflatten_and_unpermute(
+            self.transport_operator(
+                self._permute_and_flatten(latents)
+            )
+        )
+        assert latents_transported.shape == latents.shape, "Tensor shape assertion error !!!"
+
+        return latents_transported
+
+    def sample(self, batch_size: int, from_dist: Literal['source', 'target'] = 'source'):
+        shape = (batch_size, self.n) if self.common_operator else (batch_size,)
+        if from_dist == 'source': samples = self.transport_operator.source_distribution.sample(shape)
+        elif from_dist == 'target': samples = self.transport_operator.target_distribution.sample(shape)
+        else: raise NotImplementedError()
+
+        samples = samples.view(batch_size, self.n, self.dim).transpose(1, 0).contiguous()
+        samples = self._unflatten_and_unpermute(samples)
+
+        return samples
+
+    def _collage(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> List[Tensor]:
+        # Get validation samples from the target (real) distribution
+        batch = pl_module.batch_preprocess(next(iter(trainer.val_dataloaders[0])))
+        samples, kwargs = self._get_samples(pl_module, batch)
+
+        # Get the samples from the source (transformed) distribution.
+        # Use a for-loop in case the transformation doesn't support batched-inputs
+        transformed = torch.stack([self.transformations(sample) for sample in samples])
+
+        latents = self._encode(pl_module, transformed, **kwargs)
+        transformed_decoded = self._decode(pl_module, latents, **kwargs)
+        samples_transported = self._decode(pl_module, self._transport(latents), **kwargs)
+        samples_source = self._decode(pl_module, self.sample(latents.size(0), 'source').type_as(latents), **kwargs)
+        samples_target = self._decode(pl_module, self.sample(latents.size(0), 'target').type_as(latents), **kwargs)
+
+        img_list = [samples_source, transformed, transformed_decoded, samples_transported, samples, samples_target]
+        collage = utils.Collage.list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
+        return collage
 
     def _get_samples(self, pl_module: "pl.LightningModule", outputs: STEP_OUTPUT) -> Tuple[Tensor, Dict]:
         if not isinstance(outputs, dict):
@@ -319,59 +389,6 @@ class LatentTransport(Callback):
 
         return pl_module.decode(latents, **kwargs)
 
-    def _transport(self, latents: Tensor) -> Tensor:
-        orig_shape = latents.shape
-
-        latents_rearranged = self._permute_and_flatten(latents)
-
-        latents_transported = torch.stack([
-            self.transport_operators[0 if self.common_operator else i].transport(latent)
-            for i, latent in enumerate(latents_rearranged)
-        ])
-
-        latents_transported = self._unflatten_and_unpermute(latents_transported, orig_shape)
-
-        assert latents_transported.shape == latents.shape, "Tensor shape assertion error !!!"
-
-        return latents_transported
-
-    def _sample_like(self, latents: Tensor, from_dist='source'):
-        rearranged_shape = self._permute_and_flatten(latents).shape
-
-        latents_sampled = torch.stack([
-            self.transport_operators[0 if self.common_operator else i].sample(
-                rearranged_shape[1:], latents.dtype, latents.device, from_dist
-            ) for i in range(rearranged_shape[0])
-        ])
-        latents_sampled = self._unflatten_and_unpermute(latents_sampled, latents.shape)
-
-        assert latents_sampled.shape == latents.shape, "Tensor shape assertion error !!!"
-
-        return latents_sampled
-
-    def _collage(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> List[Tensor]:
-        # Get validation samples from the target (real) distribution
-        batch = pl_module.batch_preprocess(next(iter(trainer.val_dataloaders[0])))
-        samples, kwargs = self._get_samples(pl_module, batch)
-
-        # Get the samples from the source (transformed) distribution
-        transformed = torch.stack([self.transformations(sample) for sample in samples])
-
-        latents = self._encode(pl_module, transformed, **kwargs)
-        transformed_decoded = self._decode(pl_module, latents, **kwargs)
-        samples_transported = self._decode(pl_module, self._transport(latents), **kwargs)
-        samples_source = self._decode(pl_module, self._sample_like(latents, 'source'), **kwargs)
-        samples_target = self._decode(pl_module, self._sample_like(latents, 'target'), **kwargs)
-
-        img_list = [samples_source, transformed, transformed_decoded, samples_transported, samples, samples_target]
-
-        collage = utils.Collage.list_to_collage(img_list, min(samples.shape[0], self.num_samples_to_log))
-        return collage
-
-    def _val_dist(self):
-        mean_dist = sum([t.compute() for t in self.transport_operators]) / len(self.transport_operators)
-        return mean_dist
-
 
 class ConditionalLatentTransport(Callback):
     """
@@ -422,7 +439,7 @@ class ConditionalLatentTransport(Callback):
         if trainer.sanity_checking and self.transports[0].source_latents_from_train:
             return
 
-        avg_dist = sum([t._val_dist() for t in self.transports]) / self.num_classes
+        avg_dist = sum([t.transport_operator.compute().mean() for t in self.transports]) / self.num_classes
         pl_module.log(self.logging_prefix + 'avg_transport_cost', avg_dist)
 
         if self.num_samples_to_log <= 0:

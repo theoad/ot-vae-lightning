@@ -11,11 +11,13 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
+from typing import Optional
 import functools
 import numpy as np
 
 import torch.nn as nn
 import torch.nn.utils.parametrize as P
+from torch.types import _size
 
 __all__ = ['EqualizedLR', 'equalized_lr', 'apply_equalized_lr']
 
@@ -31,7 +33,13 @@ class EqualizedLR(nn.Module):
     >>> m = nn.Linear(16, 32)
     >>> P.register_parametrization(m, 'weight', elr)
     """
-    def __init__(self, gain: float = 1., lr_multiplier: float = 1., is_bias: bool = False):
+    def __init__(
+            self,
+            fan_in_dims: Optional[_size] = None,
+            gain: float = 1.,
+            lr_multiplier: float = 1.,
+            is_bias: bool = False
+    ):
         r"""
         :param gain: also known as the \alpha parameter
         :param lr_multiplier: also known as the \beta parameter
@@ -41,10 +49,11 @@ class EqualizedLR(nn.Module):
         self.gain = gain
         self.lr_multiplier = lr_multiplier
         self.is_bias = is_bias
+        self.fan_in_dims = fan_in_dims
 
     def forward(self, weight: nn.Parameter) -> nn.Parameter:
         if self.is_bias: return weight * self.lr_multiplier
-        fan_in = weight.data.size(0) if weight.dim() < 2 else np.prod(weight.shape[1:])
+        fan_in = np.prod([weight.shape[d] for d in self.fan_in_dims])
         return weight * self.lr_multiplier * self.gain / fan_in ** 0.5
 
 
@@ -53,8 +62,9 @@ def equalized_lr(m: nn.Module, gain: float = 1., lr_multiplier: float = 1., init
     if init_weights:
         nn.init.normal_(m.weight, std=1/lr_multiplier)
         nn.init.zeros_(m.bias)
-    P.register_parametrization(m, 'weight', EqualizedLR(gain, lr_multiplier, is_bias=False))
-    P.register_parametrization(m, 'bias', EqualizedLR(gain, lr_multiplier, is_bias=True))
+    fan_in_dims = [1] if type(m) == nn.Linear else [1,2,3]
+    P.register_parametrization(m, 'weight', EqualizedLR(fan_in_dims, gain, lr_multiplier, is_bias=False))
+    P.register_parametrization(m, 'bias', EqualizedLR([0], lr_multiplier, is_bias=True))
 
 
 def apply_equalized_lr(net, gain: float = 1., lr_multiplier: float = 1., init_weights: bool = True) -> None:
