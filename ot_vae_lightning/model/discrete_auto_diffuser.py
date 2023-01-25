@@ -21,10 +21,9 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import ot_vae_lightning.data    # noqa: F401
 from ot_vae_lightning.model.base import VisionCLI
-from ot_vae_lightning.prior.codebook import CodebookPrior as Vocabulary
+from ot_vae_lightning.prior.codebook import CodebookPrior
 from ot_vae_lightning.model.vae import VAE
 from ot_vae_lightning.data.torchvision_datamodule import TorchvisionDatamodule
-import ot_vae_lightning.utils as utils
 
 __all__ = ['DAD', 'DadCLI']
 
@@ -42,30 +41,23 @@ class DAD(VAE):
     # noinspection PyUnusedLocal
     def __init__(
             self,
-            vocabulary: Vocabulary,
+            *vae_args,
+            prior: CodebookPrior,
             autoregressive_decoder: nn.Module,
             ce_coeff: float = 1.,
             **vae_kwargs,
     ) -> None:
-        super().__init__(
-            prior=vocabulary,
-            **vae_kwargs
-        )
-        self.token_dims = set(vocabulary.all_dims).difference(set(vocabulary.embed_dims))
-        self.n_tokens = int(np.prod([self.latent_size[dim-1] for dim in self.token_dims]))
+        super().__init__(*vae_args, prior=prior, **vae_kwargs)
+        self.token_dims = prior.dimensionality
+        self.n_tokens = int(np.prod(prior.batch_shape))
+        self.num_embeddings = prior.num_embeddings
         self.autoregressive_decoder = autoregressive_decoder
-        self.prior_kwargs['return_distributions'] = True
-        self.prior_kwargs['return_indices'] = True
 
-    @property
-    def vocabulary(self) -> Vocabulary:
-        return self.prior   # type: ignore[return-type]
-
-    def prior_loss(self, artifacts: Dict[str, Union[Tensor, Categorical]], **kwargs) -> Tensor:
-        vocab_loss, distributions, indices = artifacts['loss'], artifacts['distributions'], artifacts['indices']
-        logits = self.autoregressive_decoder(indices.detach())  # `indices` are samples from `distributions`: q(z1 | x)
-        labels = distributions.probs    # we want the actual distributions q(zt | zt-1) - not the samples
-        expected_shape = torch.Size([vocab_loss.size(0), self.n_tokens, self.vocabulary.num_embeddings])
+    def prior_loss(self, prior_loss: Tensor, artifacts: Dict[str, Union[Tensor, Categorical]], **kwargs) -> Tensor:
+        distributions, indices = artifacts['distribution'], artifacts['indices']
+        logits = self.autoregressive_decoder(indices.detach())  # `indices` are samples from `distribution_models`: q(z1 | x)
+        labels = distributions.probs    # we want the actual distribution_models q(zt | zt-1) - not the samples
+        expected_shape = torch.Size([prior_loss.size(0), self.n_tokens, self.num_embeddings])
         assert labels.shape == logits.shape == expected_shape
 
         # p(zt-1 | zt), q(zt-1 | zt-2) with shift, so that tokens < n predict n
@@ -79,27 +71,27 @@ class DAD(VAE):
             reduction='none'
         ).sum(-1)
 
-        loss = vocab_loss + self.hparams.ce_coeff * ce_loss
-        return super().prior_loss(loss)
+        loss = prior_loss + self.hparams.ce_coeff * ce_loss
+        return super().prior_loss(loss, artifacts, **kwargs)
 
     @VAE.postprocess
     def sample(self, batch_size: int, **kwargs) -> Tensor:
+        # embed_ind = Categorical(self.prior.codebook_model.distribution.probs).sample((batch_size, self.n_tokens))
         embed_ind = torch.randint(
-            high=self.vocabulary.num_embeddings,
+            high=self.num_embeddings,
             size=(batch_size, self.n_tokens),
             device=self.device
         )
 
-        self.autoregressive_decoder.train()  # TODO: remove
+        # self.autoregressive_decoder.train()  # TODO: remove
         for i in range(self.n_tokens-1):
             next_token_distribution = Categorical(self.autoregressive_decoder(embed_ind)[:, i].softmax(-1))
             embed_ind[:, i+1] = next_token_distribution.sample()
-        self.autoregressive_decoder.eval()
+        # self.autoregressive_decoder.eval()
 
-        latents = self.vocabulary.values(embed_ind)
-
-        # TODO: Why this does not work ?
-        # latents = utils.unflatten_and_unpermute(latents, self.latent_size, self.vocabulary.embed_dims)
+        one_hot = F.one_hot(embed_ind, self.num_embeddings).type_as(self.prior.codebook_model.codebook)
+        latents = one_hot @ self.prior.codebook_model.codebook
+        latents = self.prior.unflatten_and_unpermute(latents.transpose(0, 1))
         return self.decode(latents, **kwargs, no_postprocess_override=True)
 
 
@@ -131,14 +123,14 @@ class DadCLI(VisionCLI):
         )
 
         parser.link_arguments(
-            "model.vocabulary.num_embeddings",
+            "model.num_embeddings",
             "model.autoregressive_decoder.init_args.vocab_size",
             apply_on="instantiate"
         )
 
         parser.link_arguments(
             "model.encoder.out_size",
-            "model.vocabulary.init_args.latent_size",
+            "model.prior.init_args.latent_size",
             apply_on="instantiate"
         )
 

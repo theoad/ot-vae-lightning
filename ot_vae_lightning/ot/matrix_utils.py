@@ -15,6 +15,7 @@ from typing import Union, Tuple
 
 import torch
 from torch import Tensor, BoolTensor
+from ot_vae_lightning.utils import unsqueeze_like
 
 __all__ = [
     'eye_like',
@@ -119,7 +120,7 @@ def is_spd(matrices: Tensor, strict=True) -> BoolTensor:
     return torch.logical_and(is_symmetric(matrices), is_pd(matrices, strict=strict)).bool()
 
 
-def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = False, diag: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
     """
     Add to each matrix its minimal eigen value to make it positive definite.
 
@@ -128,12 +129,16 @@ def make_psd(matrices: Tensor, strict: bool = False, return_correction: bool = F
     :param return_correction: If ``True``, returns the correction added to the diagonal of the matrices.
     :return: Tensor T with shape [*]. with T[i] = matrices[i] + min(eig(matrices[i]) * I
     """
-    small_val = torch.abs(min_eig(matrices).clamp(max=0)).unsqueeze(-1).unsqueeze(-1)
-    if strict:
-        small_val += STABILITY_CONST
-    res = matrices + small_val * eye_like(matrices)
+    smallest_eig = matrices.min(-1)[0] if diag else min_eig(matrices)
+    small_positive_val = smallest_eig.clamp(max=0).abs()
+    if strict: small_positive_val += STABILITY_CONST
+    if diag:
+        res = matrices + small_positive_val[..., None]
+    else:
+        I = eye_like(matrices)
+        res = matrices + I * small_positive_val[..., None, None]
     if return_correction:
-        return res, small_val
+        return res, small_positive_val
     return res
 
 
@@ -147,7 +152,7 @@ def mean_cov(sum: Tensor, sum_corr: Tensor, num_obs: Union[Tensor, int], diag: b
     :param diag: If ``True``, will expect the covariance to be a vector of variance
     :return: The features mean and covariance of shape [*, D] and [*, D, D] ([*, D] if `diag`==True)
     """
-    mean = sum / num_obs
-    cov = sum_corr / num_obs
+    mean = sum / unsqueeze_like(num_obs, sum)
+    cov = sum_corr / unsqueeze_like(num_obs, sum_corr)
     cov -= mean ** 2 if diag else mean.unsqueeze(-1) @ mean.unsqueeze(-2)
     return mean, cov

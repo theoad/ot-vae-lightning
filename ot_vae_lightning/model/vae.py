@@ -15,7 +15,7 @@ import warnings
 import inspect
 import functools
 import itertools
-from typing import Tuple, Optional, Dict, List, Union, Any, Literal
+from typing import Tuple, Optional, Dict, List, Union, Literal
 import numpy as np
 
 import torch
@@ -62,7 +62,6 @@ class VAE(VisionModule):
             decoder: Optional[nn.Module] = None,
             conditional: bool = False,
             expansion: int = 1,
-            prior_kwargs: Dict[str, Any] = {},
             **base_kwargs
     ) -> None:
         """
@@ -122,7 +121,6 @@ class VAE(VisionModule):
         self._expand = functools.partial(utils.replicate_batch, n=expansion)
         self._reduce_mean = functools.partial(utils.mean_replicated_batch, n=expansion)
         self._reduce_std = functools.partial(utils.std_replicated_batch, n=expansion)
-        self.prior_kwargs = prior_kwargs
 
     @progressive.transform_batch_tv()
     def batch_preprocess(self, batch) -> Batch:
@@ -160,7 +158,7 @@ class VAE(VisionModule):
     def recon_loss(self, reconstructions: Tensor, target: Tensor, **kwargs) -> Tensor:
         return F.mse_loss(reconstructions, target)
 
-    def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
+    def prior_loss(self, prior_loss: Tensor, prior_artifacts, **kwargs) -> Tensor:
         return prior_loss.mean()
 
     # noinspection PyUnusedLocal
@@ -168,11 +166,11 @@ class VAE(VisionModule):
         samples, target, kwargs = batch['samples'], batch['target'], batch['kwargs']
         batch_size = samples.size(0)
 
-        latents, prior_loss = self.encode(samples, expand=True, return_prior_loss=True, **kwargs)
+        latents, prior_loss, prior_artifacts = self.encode(samples, expand=True, return_prior_artifacts=True, **kwargs)
         reconstructions = self.decode(latents, expand_kwargs=True, **kwargs)
         reconstructions_mean = self._reduce_mean(reconstructions)
 
-        prior_loss = self.prior_loss(prior_loss, **kwargs) / np.prod(samples.shape[1:])
+        prior_loss = self.prior_loss(prior_loss, prior_artifacts, **kwargs) / np.prod(samples.shape[1:])
         recon_loss = self.recon_loss(reconstructions_mean, target, **kwargs)
 
         loss = recon_loss + prior_loss
@@ -182,10 +180,13 @@ class VAE(VisionModule):
             'train/loss/prior': prior_loss
         }
 
-        batch['preds'] = reconstructions[:batch_size]
-        batch['latents'] = latents[:batch_size]
-        batch['preds_mean'] = reconstructions_mean
-        return loss, logs, batch
+        artifacts = {
+            'preds': reconstructions[:batch_size],
+            'latents': latents[:batch_size],
+            'preds_mean': reconstructions_mean
+        }
+
+        return loss, logs, {**batch, **artifacts, **prior_artifacts}
 
     @property
     def latent_size(self):
@@ -201,24 +202,23 @@ class VAE(VisionModule):
     def encode(
             self,
             samples: Tensor,
-            return_prior_loss: bool = False,
+            return_prior_artifacts: bool = False,
             expand: bool = False,
             **kwargs
-    ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+    ) -> Union[Tensor, Prior.EncodingResults]:
         with self.filter_kwargs(self._encode_func) as encode, self.filter_kwargs(self.prior) as prior:
             encodings = encode(samples, **kwargs)
             if expand: encodings, kwargs = self._expand(encodings), self._expand(kwargs)
 
             if self.prior is None:
-                latents, prior_loss = encodings, torch.zeros(encodings.size(0), out=torch.empty_like(encodings))
+                results = encodings, torch.zeros(encodings.size(0), out=torch.empty_like(encodings)), {}
             else:
-                latents, prior_loss = prior(encodings, **kwargs, step=self.global_step, **self.prior_kwargs)
+                results = prior(encodings, **kwargs, step=self.global_step)
 
-        if return_prior_loss:
-            assert not self.inference, 'The prior loss cannot be returned when the model is in inference mode'
-            return latents, prior_loss
+        if return_prior_artifacts:
+            return results
 
-        return latents
+        return results[0]
 
     @VisionModule.postprocess
     def decode(self, latents: Tensor, expand_kwargs: bool = False, **kwargs) -> Tensor:
@@ -273,7 +273,7 @@ if __name__ == '__main__':
     import re
     import lovely_tensors as lt
     import ot_vae_lightning.data  # noqa: F401
-    from ot_vae_lightning.ot.transport import GaussianTransport, GMMTransport
+    from ot_vae_lightning.ot.transport import GaussianTransport, GMMTransport, DiscreteTransport
 
     lt.monkey_patch()
     # torch.set_float32_matmul_precision('high')
@@ -287,59 +287,33 @@ if __name__ == '__main__':
         run=False
     )
 
-    transport_kwargs = dict(
-        transport_dims=(1,),
-        size=cli.model.latent_size,
-        transformations=T.GaussianBlur(9, sigma=(4, 4)),
-        source_latents_from_train=False,
-        target_latents_from_train=False,
-        unpaired=True,
-        verbose=True,
-        make_pd=True,
-        stochastic=False,
-        pg_star=0.,
+    w2_cfg = dict(diag=False, stochastic=False, pg_star=0., make_pd=True, verbose=True, dtype=torch.double)
+    mixture_cfg = dict(metric='euclidean', p=2., topk=None, temperature=1., training_mode='argmax', inference_mode='argmax')
+    source_cfg = dict(update_decay=None, update_with_autograd=False, dtype=torch.double)
+    target_cfg = dict(update_decay=None, update_with_autograd=False, dtype=torch.double)
+    callback_cfg = dict(
+        transport_dims=(1,), size=cli.model.latent_size, transformations=T.GaussianBlur(9, sigma=(4, 4)),
+        source_latents_from_train=False, target_latents_from_train=False, unpaired=True, common_operator=True,
+        reset_source=True, store_source=False, reset_target=True, store_target=False,
     )
 
     cli.trainer.callbacks += [
         LatentTransport(
             transport_operator=GMMTransport,
-            logging_prefix='gmm128x512-common-diag-barycenter-smooth',
-            common_operator=True,
-            diag=True,
-            n_components_source=128,
-            n_components_target=512,
-            transport_type='barycenter',
-            smooth_assignment=True,
-            **transport_kwargs
-        ),
-        LatentTransport(
-            transport_operator=GMMTransport,
-            logging_prefix='gmm128x512-common-diag-sample-hard',
-            common_operator=True,
-            diag=True,
-            n_components_source=128,
-            n_components_target=512,
-            transport_type='sample',
-            smooth_assignment=False,
-            **transport_kwargs
-        ),
-        LatentTransport(
-            transport_operator=GMMTransport,
-            logging_prefix='gmm16x64-common-diag-smooth',
-            common_operator=True,
-            diag=True,
-            n_components_source=16,
-            n_components_target=64,
-            transport_type='barycenter',
-            smooth_assignment=True,
-            **transport_kwargs
+            logging_prefix='64-argmax-diag',
+            transport_type='argmax',
+            transport_cfg={**w2_cfg, 'diag': True},
+            source_cfg={**source_cfg, 'mixture_cfg': {**mixture_cfg, 'n_components': 64}},
+            target_cfg={**target_cfg, 'mixture_cfg': {**mixture_cfg, 'n_components': 64}},
+            **callback_cfg
         ),
         LatentTransport(
             transport_operator=GaussianTransport,
-            logging_prefix='gaussian-deterministic',
-            common_operator=True,
-            diag=False,
-            **transport_kwargs
+            logging_prefix='full-covariance',
+            transport_cfg={**w2_cfg, 'diag': False},
+            source_cfg=source_cfg,
+            target_cfg=target_cfg,
+            **callback_cfg
         ),
     ]
 

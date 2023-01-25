@@ -1,8 +1,10 @@
 import re
 import inspect
 from copy import copy
+from functools import partial
+import warnings
 
-from typing import Union, Sequence, Callable, List
+from typing import Union, Sequence, Callable, List, Optional
 import contextlib
 import numpy as np
 
@@ -16,20 +18,41 @@ from ot_vae_lightning.utils.collage import *
 from ot_vae_lightning.utils.elr import *
 from ot_vae_lightning.utils.partial_checkpoint import *
 
+from pytorch_lightning.utilities.distributed import sync_ddp_if_available, gather_all_tensors, distributed_available
+from pytorch_lightning.utilities import rank_zero_warn
+
+def gather_all_if_ddp_available(tensors: Tensor):
+    if distributed_available():
+        return gather_all_tensors(tensors)
+    return [tensors]
+
+DDPAllGather = Callable[[Tensor], List[Tensor]]
+DDPAllReduce = Callable[[Tensor], Tensor]
+DDPWarn = Callable[[str], None]
+ddp_reduce_func_default: DDPAllReduce = partial(sync_ddp_if_available, reduce_op="sum")
+ddp_gather_all_default: DDPAllGather = gather_all_if_ddp_available
+ddp_warn_default: DDPWarn = rank_zero_warn
+
+
+class DDPMixin(object):
+    def __init__(
+            self,
+            ddp_reduce_func: Optional[DDPAllReduce] = ddp_reduce_func_default,
+            ddp_gather_func: Optional[DDPAllGather] = gather_all_if_ddp_available,
+            ddp_warn_func: Optional[DDPWarn] = ddp_warn_default
+    ):
+        self.reduce = ddp_reduce_func or (lambda x: x)
+        self.gather = ddp_gather_func or (lambda x: [x])
+        self.warn = ddp_warn_func or warnings.warn
+
 
 class ToTensor(T.ToTensor):
-    """
-    TODO
-    """
     def __call__(self, pic):
         if isinstance(pic, Tensor): return pic
         return super().__call__(pic)
 
 
 class UnNormalize(nn.Module):
-    """
-    TODO
-    """
     def __init__(
             self,
             mean: Union[Tensor, Sequence[float]],
@@ -172,7 +195,15 @@ def ema_inplace(moving_avg, new, decay):
     :param decay:
     :return:
     """
-    moving_avg.data.mul_(decay).add_(new, alpha=(1 - decay))
+    if decay is None:
+        moving_avg.add_(new)
+    else:
+        moving_avg.mul_(decay).add_(new, alpha=(1 - decay))
+
+
+def ema(moving_avg, new, decay):
+    if decay is None: return moving_avg + new
+    return moving_avg * decay + new * (1 - decay)
 
 
 def laplace_smoothing(x, n_categories, eps=1e-5):
@@ -183,7 +214,8 @@ def laplace_smoothing(x, n_categories, eps=1e-5):
     :param eps:
     :return:
     """
-    return (x + eps) / (x.sum() + n_categories * eps)
+    if eps is None: return x
+    return (x + eps) / (x.sum(-1, keepdim=True) + n_categories * eps) * x.sum(-1, keepdim=True)
 
 
 def hasarg(callee, arg_name: str):
@@ -205,19 +237,34 @@ def permute_and_flatten(
         flatten_batch: bool = False
 ) -> Tensor:
     """
-    TODO
+    TL; DR
+    >>> B, D1, B1, D2, B2, B3 = 10, 1, 2, 3, 4, 5
+    >>> x = torch.randn(B, D1, B1, D2, B2, B3)
+    >>> permute_and_flatten(x, (1, 3)).shape == torch.Size([B, B1 * B2 * B3, D1 * D2])
+    >>> True
+    >>> permute_and_flatten(x, (1, 3), batch_first=False).shape == torch.Size([B1 * B2 * B3, B, D1 * D2])
+    >>> True
+    >>> permute_and_flatten(x, (1, 3), flatten_batch=True).shape == torch.Size([B * B1 * B2 * B3, D1 * D2])
     """
-    remaining_dims = set(range(1, x.dim())).difference(set(permute_dims))
-    if len(remaining_dims) == 0: return x.unsqueeze(0)
+    all_dims = set(range(1, x.dim()))
+    if len(all_dims) == 0:
+        raise ValueError("`input` is expected to have at least 2 dimensions")
+    if len(permute_dims) == 0:
+        raise ValueError("`permute_dims` is expected to contain at least one dimension")
+    if not set(permute_dims).issubset(all_dims):
+        raise ValueError("`permute_dims` is expected to be a subset of the `input` dimensions")
 
-    if batch_first: x_rearranged = x.permute(0, *remaining_dims, *permute_dims)
-    else:           x_rearranged = x.permute(*remaining_dims, 0, *permute_dims)
+    remaining_dims = all_dims.difference(set(permute_dims))
+    if len(remaining_dims) == 0: return x.flatten(int(not flatten_batch))
+
+    if batch_first: x_rearranged = x.permute(0, *remaining_dims, *permute_dims).contiguous()
+    else:           x_rearranged = x.permute(*remaining_dims, 0, *permute_dims).contiguous()
 
     x_rearranged = x_rearranged.flatten(
         int(batch_first and not flatten_batch),
         len(remaining_dims) - int(not batch_first and not flatten_batch))
-    if flatten_batch: x_rearranged = x_rearranged.unsqueeze(0)
-    return x_rearranged.contiguous()
+    x_rearranged = x_rearranged.flatten(-len(permute_dims))
+    return x_rearranged
 
 
 def unflatten_and_unpermute(
@@ -228,18 +275,29 @@ def unflatten_and_unpermute(
         flatten_batch: bool = False
 ) -> Tensor:
     """
-    TODO
+    TL; DR
+    >>> B, D1, B1, D2, B2, B3 = 10, 1, 2, 3, 4, 5
+    >>> x = torch.randn(B, D1, B1, D2, B2, B3)
+    >>> xr = permute_and_flatten(x, permute_dims=(1, 3))
+    >>> xr.shape == torch.Size([B, B1 * B2 * B3, D1 * D2])
+    >>> True
+    >>> xo = unflatten_and_unpermute(xr, x.shape, (1, 3))
+    >>> bool((x == xo).all())
+    >>> True
     """
     remaining_dims = set(range(1, len(orig_shape))).difference(set(permute_dims))
-    if len(remaining_dims) == 0: return xr.squeeze(0)
+    if len(remaining_dims) == 0: return xr.view(*orig_shape)
+    permute_shape = [orig_shape[d] for d in permute_dims]
+    remaining_shape = [orig_shape[d] for d in remaining_dims]
 
+    x = xr
     if flatten_batch:
-        xr = xr.squeeze(0)
         bs = orig_shape[0]
-        n_elem_remaining = np.prod([orig_shape[d] for d in remaining_dims])
-        xr = xr.unflatten(0, [bs, n_elem_remaining] if batch_first else [n_elem_remaining, bs])
+        n_elem_remaining = np.prod(remaining_shape)
+        x = x.unflatten(0, [bs, n_elem_remaining] if batch_first else [n_elem_remaining, bs])
 
-    x = xr.unflatten(int(batch_first), [orig_shape[d] for d in remaining_dims])  # type: ignore[arg-type]
+    x = x.unflatten(-1, permute_shape)
+    x = x.unflatten(int(batch_first), remaining_shape)
 
     permutation_map = list(range(len(orig_shape)))
     if not batch_first: permutation_map[0] = len(remaining_dims)

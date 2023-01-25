@@ -17,7 +17,7 @@ import functools
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torch.types import _size
+from torch.types import _size, _device
 from ot_vae_lightning.prior.base import Prior
 from ot_vae_lightning.prior.gaussian import GaussianPrior
 from numpy import prod
@@ -27,7 +27,7 @@ import ot_vae_lightning.utils as utils
 __all__ = ['ConditionalGaussianPrior']
 
 
-class ConditionalGaussianPrior(GaussianPrior):
+class ConditionalGaussianPrior(GaussianPrior, utils.DDPMixin):
     """
     `PyTorch <https://pytorch.org/>`_ implementation of a Conditional Gaussian Prior
 
@@ -47,7 +47,8 @@ class ConditionalGaussianPrior(GaussianPrior):
             annealing_steps: int = 0,
             fixed_var: bool = False,
             embedding_ema_decay: Optional[float] = None,
-            eps: float = 1e-5
+            eps: float = 1e-5,
+            **ddp_kwargs
     ):
         r"""
         Initializes a Gaussian prior conditioned on a discrete condition (e.g. class label)
@@ -69,7 +70,8 @@ class ConditionalGaussianPrior(GaussianPrior):
                               wasserstein-2 barycenter of the observed samples instead of learning them with SGD.
         :param eps: A stabilization constant relevant for the EMA update.
         """
-        super().__init__(loss_coeff, empirical_kl, reparam_dim, annealing_steps, fixed_var)
+        GaussianPrior.__init__(self, loss_coeff, empirical_kl, reparam_dim, annealing_steps, fixed_var)
+        utils.DDPMixin.__init__(self, **ddp_kwargs)
         self.dim = dim
         self.num_classes = num_classes
         self.decay = embedding_ema_decay
@@ -89,15 +91,16 @@ class ConditionalGaussianPrior(GaussianPrior):
     def p(self, labels: Tensor) -> Distribution:
         return Normal(self._mu(labels).unflatten(1, self.dim), self._log_std(labels).unflatten(1, self.dim).exp())
 
-    def encode(self, x: Tensor, labels: Tensor) -> Tuple[Tensor, Tensor]:  # noqa arguments-differ
+    def encode(self, x: Tensor, labels: Tensor) -> GaussianPrior.EncodingResults:  # noqa arguments-differ
         p, q = self.p(labels), self.reparametrization(x)
         z = q.rsample()
         loss = self.empirical_reverse_kl(p, q, z) if self.empirical_kl else self.closed_form_reverse_kl(p, q)
         if self.decay is not None and self.decay > 0 and self.training:
             self.ema_update(q, labels)
-        return z, loss
+        artifacts = {'prior': p, 'distribution': q}
+        return z, loss, artifacts
 
-    def sample(self, shape: _size, device: torch.device, labels: Tensor) -> Tensor:  # noqa arguments-differ
+    def sample(self, shape: _size, device: _device, labels: Tensor) -> Tensor:  # noqa arguments-differ
         return self.p(labels).sample().to(device)
 
     def ema_update(self, q: Distribution, labels: Tensor) -> None:
@@ -107,18 +110,14 @@ class ConditionalGaussianPrior(GaussianPrior):
         mu_sum = one_hot.transpose(-2, -1) @ q.mean.flatten(1)  # [num_classes, batch] x [batch, dim]
         log_std_sum = one_hot.transpose(-2, -1) @ q.stddev.log().flatten(1)  # [num_classes, batch] x [batch, dim]
 
-        # all_reduce(sizes)
-        # all_reduce(mu_sum)
-        # all_reduce(log_std_sum)
+        self.ema(self._size, self.reduce(sizes))
+        self.ema(self._mu_avg, self.reduce(mu_sum))
+        self.ema(self._log_std_avg, self.reduce(log_std_sum))
 
-        self.ema(self._size, sizes)
-        self.ema(self._mu_avg, mu_sum)
-        self.ema(self._log_std_avg, log_std_sum)
-
-        sizes = utils.laplace_smoothing(self._size, self.num_classes, self.eps) * self._size.sum()
+        sizes = utils.laplace_smoothing(self._size, self.num_classes, self.eps)
 
         self._mu.weight.copy_(self._mu_avg.data / sizes.unsqueeze(-1))
         self._log_std.weight.copy_(self._log_std_avg.data / sizes.unsqueeze(-1))
 
     def forward(self, x: Tensor, step: int, labels: Tensor) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
-        return Prior.forward(self, x, step, labels=labels)    # type: ignore[arg-type]
+        return Prior.forward(self, x, step, labels=labels)

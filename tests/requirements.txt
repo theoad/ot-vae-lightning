@@ -9,3 +9,4 @@ twine==1.13.0
 retrying
 scipy
 pot
+matplotlib

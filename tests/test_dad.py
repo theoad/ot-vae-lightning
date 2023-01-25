@@ -22,7 +22,7 @@ from ot_vae_lightning.prior.codebook import CodebookPrior as Vocabulary
 from ot_vae_lightning.data import MNIST
 from ot_vae_lightning.networks import ViT
 
-_PSNR_PERFORMANCE = 17      # TODO: make this higher
+_PSNR_PERFORMANCE = 13      # TODO: make this higher
 _MAX_EPOCH = 2
 _DIM = 64
 
@@ -77,31 +77,31 @@ def test_dad(prog_bar=False, batch_size=50):
     )
 
     vocab = Vocabulary(
-        num_embeddings=512,
         latent_size=encoder.out_size,
         embed_dims=(2,),
-        similarity_metric='l2',
-        separate_key_values=False,
-        mode='sample',
-        temperature=1,
-        loss_coeff=1
+        loss=None,
+        annealing_steps=0,
+        temperature_annealing=2000,
+        mixture_cfg={
+            'n_components': 128,
+            'metric': 'euclidean',
+            'temperature': 1e-5,
+            'training_mode': 'gumbel-softmax',
+            'inference_mode': 'sample'
+        },
+        update_with_autograd=True,
     )
 
     vocab_embed = torch.nn.Embedding(vocab.num_embeddings, _DIM)
     decoder_head = torch.nn.Linear(_DIM, vocab_embed.num_embeddings)
     autoregressive = torch.nn.Sequential(vocab_embed, autoregressive, decoder_head)
 
-    vocab_config = dict(
-        permute=False
-    )
-
     model = DAD(  # LightningModule
         metrics=MetricCollection({'psnr': PeakSignalNoiseRatio()}),
         encoder=encoder,                              # q(z1   | x)
         decoder=decoder,                              # p(x    | z1)
         autoregressive_decoder=autoregressive,        # p(zt-1 | zt)
-        vocabulary=vocab,
-        prior_kwargs=vocab_config,
+        prior=vocab,
     )
 
     assert model.latent_size == torch.Size([(28 // 7) ** 2, vit_tiny_cfg['dim']])

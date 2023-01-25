@@ -11,10 +11,10 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Tuple, Optional
+from typing import Optional
 import torch
 from torch import Tensor
-from torch.types import _size
+from torch.types import _size, _device
 from ot_vae_lightning.prior.base import Prior
 from torch.distributions import Distribution, Normal
 from ot_vae_lightning.utils import unsqueeze_like
@@ -87,15 +87,16 @@ class GaussianPrior(Prior):
         reparam_size[reparam_dim] //= 2   # re-parametrization trick
         return torch.Size(reparam_size)
 
-    def encode(self, x: Tensor, time: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
+    def encode(self, x: Tensor, time: Optional[Tensor] = None) -> Prior.EncodingResults:
         q = self.reparametrization(x, temperature=time)
         p = self.reparametrization(torch.zeros_like(x))
         z = q.rsample()
         loss = self.empirical_reverse_kl(p, q, z) if self.empirical_kl else self.closed_form_reverse_kl(p, q)
-        return z, loss
+        artifacts = {'prior': p, 'distribution': q}
+        return z, loss, artifacts
 
-    def sample(self, shape: _size, device: torch.device) -> Tensor:   # noqa arguments-differ
+    def sample(self, shape: _size, device: _device) -> Tensor:
         return torch.randn(*shape, device=device)
 
-    def forward(self, x: Tensor, step: int, time: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:   # noqa arguments-differ
+    def forward(self, x: Tensor, step: int, time: Optional[Tensor] = None) -> Prior.EncodingResults:
         return super().forward(x, step, time=time)

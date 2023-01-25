@@ -22,7 +22,7 @@ from ot_vae_lightning.model import VAE
 from ot_vae_lightning.prior import ConditionalGaussianPrior
 from ot_vae_lightning.data import CIFAR10
 from ot_vae_lightning.networks import ViT
-from ot_vae_lightning.ot import LatentTransport
+from ot_vae_lightning.ot import LatentTransport, ConditionalLatentTransport
 from ot_vae_lightning.data.progressive_callback import ProgressiveTransform, PgTransform
 from ot_vae_lightning.ot.transport import GaussianTransport
 
@@ -30,16 +30,6 @@ _PSNR_PERFORMANCE = 18
 _TRANSPORT_PERFORMANCE = 18
 _MAX_EPOCH = 2
 _DIM = 128
-
-transport_kwargs = dict(
-    transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
-    transport_operator=GaussianTransport,
-    make_pd=True,
-    verbose=True,
-    stochastic=False,
-    pg_star=0,
-    persistent=True
-)
 
 
 def test_vae_vit_training(prog_bar=False, batch_size=50):
@@ -98,16 +88,18 @@ def test_vae_vit_training(prog_bar=False, batch_size=50):
     assert model.latent_size == torch.Size((1, vit_tiny_cfg['dim']))
 
     callbacks = [
-        ProgressiveTransform(
-            PgTransform(GaussianBlur, {'sigma': [(1, 1), (0.5, 0.5)]}, kernel_size=5),
-            schedule=[0, 1]
-        ),
+        ProgressiveTransform(PgTransform(GaussianBlur, {'sigma': [(1, 1), (0.5, 0.5)]}, kernel_size=5), schedule=[0, 1]),
         LatentTransport(
             size=model.latent_size,
             transport_dims=(2,),
-            diag=False,
+            transformations=GaussianBlur(5, sigma=(1.5, 1.5)),
+            transport_operator=GaussianTransport,
             logging_prefix="embed_token",
-            **transport_kwargs
+            transport_cfg=dict(diag=False, make_pd=True, verbose=True, stochastic=False, pg_star=0, persistent=True),
+            source_latents_from_train=False, target_latents_from_train=True, unpaired=True, common_operator=True,
+            reset_source=True, store_source=False, reset_target=False, store_target=False,
+            source_cfg=dict(update_decay=None, update_with_autograd=False, dtype=torch.double),
+            target_cfg=dict(update_decay=0.995, update_with_autograd=False, dtype=torch.double, reduce_on_update=False),
         ),
     ]
 

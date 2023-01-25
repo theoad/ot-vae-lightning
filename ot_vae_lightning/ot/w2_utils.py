@@ -13,7 +13,8 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 """
 from math import sqrt
 from itertools import groupby
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Type, Union
+from functools import partial
 
 import torch
 from torch import Tensor
@@ -30,7 +31,8 @@ __all__ = [
     'sinkhorn_log',
     'gaussian_barycenter',
     'compute_transport_operators',
-    'apply_transport'
+    'apply_transport',
+    'W2Mixin'
 ]
 
 # ******************************************************************************************************************** #
@@ -45,7 +47,7 @@ def w2_gaussian(
         dtype: Optional[_dtype] = torch.double
 ) -> Tensor:
     """
-    Computes closed form squared W2 distance between Gaussian distributions (also known as Gelbrich Distance)
+    Computes closed form squared W2 distance between Gaussian distribution_models (also known as Gelbrich Distance)
     :param mean_source: A 1-dim vectors representing the source distribution mean with optional leading batch dims [*, D]
     :param mean_target: A 1-dim vectors representing the target distribution mean with optional leading batch dims [*, D]
     :param cov_source: A 2-dim matrix representing the source distribution covariance [*, D, D]
@@ -96,8 +98,8 @@ def batch_w2_dissimilarity_gaussian_diag(
         D_{bij} = W^{2}_{2}(\mathcal{N}(\mu_{bi}^{s} , \mathbf{I} \sigma_{bi}^{s}^{2}),
          \mathcal{N}(\mu_{bj}^{t} , \mathbf{I} \sigma_{bj}^{t}^{2}))
 
-    :param mean_source: means of source distributions. [*, N, D]
-    :param mean_target: means of target distributions. [*, M, D]
+    :param mean_source: means of source distribution_models. [*, N, D]
+    :param mean_target: means of target distribution_models. [*, M, D]
     :param var_source: vars of source distribution (scale). [*, N, D]
     :param var_target: vars of target distribution (scale). [*, M, D]
     :param dtype: The type from which the result will be computed.
@@ -152,8 +154,8 @@ def batch_w2_dissimilarity_gaussian(
         D_{bij} = W^{2}_{2}(\mathcal{N}(\mu_{bi}^{s} , \Sigma_{bi}^{s}^{2}),
          \mathcal{N}(\mu_{bj}^{t} , \Sigma_{bj}^{t}^{2}))
 
-    :param mean_source: means of source distributions. [*, N, D]
-    :param mean_target: means of target distributions. [*, M, D]
+    :param mean_source: means of source distribution_models. [*, N, D]
+    :param mean_target: means of target distribution_models. [*, M, D]
     :param cov_source: covariance matrix of source distribution. [*, N, D, D]
     :param cov_target: covariance matrix of target distribution. [*, M, D, D]
     :param dtype: The type from which the result will be computed.
@@ -218,8 +220,8 @@ def batch_ot_gmm(
     [1] Marco Cuturi, Sinkhorn Distances: Lightspeed Computation of Optimal Transport
     [2] Yongxin Chen, Tryphon T. Georgiou and Allen Tannenbaum Optimal transport for Gaussian mixture models
 
-    :param mean_source: batch of means of source distributions. [*, N, D]
-    :param mean_target: batch of means of target distributions. [*, M, D]
+    :param mean_source: batch of means of source distribution_models. [*, N, D]
+    :param mean_target: batch of means of target distribution_models. [*, M, D]
     :param cov_source: covariance matrix of source distribution. [*, N, D, D] ([*, N, D] if `diag=True`)
     :param cov_target: covariance matrix of source distribution. [*, M, D, D] ([*, N, D] if `diag=True`)
     :param diag: If ``True`` expects variance vectors instead of covariance matrices
@@ -258,7 +260,7 @@ def batch_ot_gmm(
         cost_matrix = batch_w2_dissimilarity_gaussian(
             mean_source, mean_target, cov_source, cov_target,
             make_pd=True, verbose=verbose, dtype=dtype
-        )
+        )  # TODO: This gives NaN !
 
     max_per_mat = cost_matrix.max(-2, keepdim=True)[0].max(-1, keepdim=True)[0]
     coupling = sinkhorn_log(weight_source, weight_target, cost_matrix/max_per_mat, **sinkhorn_kwargs)
@@ -329,7 +331,7 @@ def gaussian_barycenter(
         dtype: Optional[_dtype] = torch.double
 ) -> Tuple[Tensor, Tensor]:
     r"""
-    Computes the W2 Barycenter of the Gaussian distributions Normal(MU[i], diagC[i]) with weight weight_source[i]
+    Computes the W2 Barycenter of the Gaussian distribution_models Normal(MU[i], diagC[i]) with weight weight_source[i]
     according to the fixed point method introduced in [1].
 
     .. math::
@@ -528,12 +530,84 @@ def apply_transport(
 # ******************************************************************************************************************** #
 
 
+class W2Mixin(object):
+    def __init__(self, **kwargs):
+        self._orig_kwargs = kwargs
+        self.stochastic = kwargs.pop('stochastic', False)
+        self.diag = kwargs.pop('diag', False)
+        self.pg_star = kwargs.pop('pg_star', 0.)
+        self.make_pd = kwargs.pop('make_pd', False)
+        self.verbose = kwargs.pop('verbose', False)
+        self.dtype = kwargs.pop('dtype', torch.double)
+
+        self.mean_cov = partial(mean_cov, diag=self.diag)
+        self.batch_w2_dissimilarity_gaussian_diag = partial(batch_w2_dissimilarity_gaussian_diag, dtype=self.dtype)
+        self.batch_w2_dissimilarity_gaussian = partial(batch_w2_dissimilarity_gaussian, make_pd=self.make_pd, verbose=self.verbose, dtype=self.dtype)
+        self.batch_ot_gmm = partial(batch_ot_gmm, diag=self.diag, verbose=self.verbose, dtype=self.dtype)
+        self.gaussian_barycenter = partial(gaussian_barycenter, diag=self.diag, dtype=self.dtype)
+        self.compute_transport_operators = partial(
+            compute_transport_operators, diag=self.diag, stochastic=self.stochastic, pg_star=self.pg_star,
+            make_pd=self.make_pd, verbose=self.verbose, dtype=self.dtype
+        )
+
+    def get_var_normal(self, distribution: Union[D.Normal, D.MultivariateNormal]):
+        return distribution.variance if self.diag else distribution.covariance_matrix
+
+    def instantiate_normal(self, *args, **kwargs):
+        if self.diag:
+            kwargs.pop('covariance_matrix', None)
+            kwargs.pop('precision_matrix', None)
+            kwargs.pop('scale_tril', None)
+            return D.Independent(D.Normal(*args, **kwargs), 1)
+        else:
+            kwargs.pop('scale', None)
+            return D.MultivariateNormal(*args, **kwargs)
+
+    def w2_gaussian(
+            self,
+            mean_source: Tensor,
+            mean_target: Tensor,
+            cov_source: Tensor,
+            cov_target: Tensor,
+    ) -> Tensor:
+        return w2_gaussian(
+            mean_source,
+            mean_target,
+            torch.diag_embed(cov_source) if self.diag else cov_source,
+            torch.diag_embed(cov_target) if self.diag else cov_target,
+            make_pd=self.make_pd, verbose=self.verbose, dtype=self.dtype
+        )
+
+    def apply_transport(
+            self,
+            inputs: Tensor,
+            mean_source: Tensor,
+            mean_target: Tensor,
+            T: Tensor,
+            Cw: Tensor,
+            batch_dim: Optional[int] = None,
+    ) -> Tensor:
+        return apply_transport(
+            inputs,
+            mean_source.unsqueeze(batch_dim) if batch_dim is not None else mean_source,
+            mean_target.unsqueeze(batch_dim) if batch_dim is not None else mean_target,
+            T.unsqueeze(batch_dim - bool(not self.diag)) if batch_dim is not None else T,
+            Cw.unsqueeze(batch_dim - bool(not self.diag)) if batch_dim is not None else Cw,
+            diag=self.diag, make_pd=self.make_pd, verbose=self.verbose, dtype=self.dtype
+        )
+
+    def __repr__(self):
+        return ', '.join([f'{k}={v}' for k,v in self._orig_kwargs.items()])
+
+# ******************************************************************************************************************** #
+
+
 def _validate_args(
         *args,
         make_pd: bool = False,
         verbose: bool = False,
         dtype: Optional[_dtype] = None,
-        tol: float = STABILITY_CONST
+        tol: float = 1e-5
 ) -> Tuple[Tensor]:
     dim_stack = []
     comp_stack = []

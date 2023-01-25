@@ -11,12 +11,12 @@ Implemented by: `Theo J. Adrai <https://github.com/theoad>`_ All rights reserved
 
 ************************************************************************************************************************
 """
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Union
 from abc import ABC, abstractmethod
 from math import cos, pi
 
 from torch import Tensor
-from torch.types import _size
+from torch.types import _size, _device
 import torch.nn as nn
 from torch.distributions import Distribution
 
@@ -27,17 +27,20 @@ class Prior(nn.Module, ABC):
     """
     Prior abstract class.
     """
+
+    EncodingResults = Tuple[Tensor, Tensor, Dict[str, Union[Tensor, Distribution]]]
+
     def __init__(self, loss_coeff: float = 1., annealing_steps: int = 0):
         """
         :param loss_coeff: balancing coefficient of the prior loss
         :param annealing_steps: the number of cosine annealing steps given to the prior loss to warm-up.
         """
-        super().__init__()
+        nn.Module.__init__(self)
         self._loss_coeff = loss_coeff
         self.annealing_steps = annealing_steps
 
     @abstractmethod
-    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+    def encode(self, x: Tensor) -> EncodingResults:
         """
         Implement the encoding step.
         The method is called by `forward` and should implement the prior-related logic:
@@ -47,7 +50,7 @@ class Prior(nn.Module, ABC):
         """
 
     @abstractmethod
-    def sample(self, shape, device) -> Tensor:
+    def sample(self, shape: _size, device: _device) -> Tensor:
         """
         Implement the sampling step.
         """
@@ -68,9 +71,8 @@ class Prior(nn.Module, ABC):
     def loss_coeff(self):
         return self._loss_coeff
 
-    def forward(self, x: Tensor, step: int, **kwargs) -> Tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor, step: int, **kwargs) -> EncodingResults:
         annealing = (0.5 * cos(pi * (step / self.annealing_steps + 1)) + 0.5) if self.annealing_steps > step else 1
-        z, loss = self.encode(x, **kwargs)   # type: ignore[arg-type]
-        if isinstance(loss, dict): loss['loss'] *= self.loss_coeff * annealing
-        else: loss *= self.loss_coeff * annealing
-        return z, loss
+        z, loss, artifacts = self.encode(x, **kwargs)  # noqa
+        loss *= self.loss_coeff * annealing
+        return z, loss, artifacts

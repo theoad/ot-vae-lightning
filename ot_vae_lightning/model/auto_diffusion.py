@@ -26,7 +26,7 @@ class AutoDiffusion(VAE):
         pbatch['kwargs']['time'] = t
         return pbatch
 
-    def prior_loss(self, prior_loss: Tensor, **kwargs) -> Tensor:
+    def prior_loss(self, prior_loss: Tensor, prior_artifacts, **kwargs) -> Tensor:
         t = self._expand(kwargs['time'])
         beta_t = 0.5 * torch.tanh(10 * (t-0.5)) + 0.5
         return (beta_t * prior_loss).mean()

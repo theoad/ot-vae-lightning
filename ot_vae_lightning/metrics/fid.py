@@ -122,7 +122,7 @@ class FrechetInceptionDistance(Metric):
             self.num_fake_obs += samples.shape[0]
 
     def compute(self) -> Tensor:
-        """ Calculate FID score based on accumulated extracted features from the two distributions """
+        """ Calculate FID score based on accumulated extracted features from the two distribution_models """
         if self.num_fake_obs < 1e3 or self.num_real_obs < 1000: return torch.ones(1) * float('inf')
         real_mean, real_cov = mean_cov(self.real_sum, self.real_correlation, self.num_real_obs)
         fake_mean, fake_cov = mean_cov(self.fake_sum, self.fake_correlation, self.num_fake_obs)

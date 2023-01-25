@@ -46,7 +46,7 @@ def empirical_cov_computation(dim, n_samples, batch_size=100):
 
         empirical_mean = torch.zeros_like(mean)
         empirical_cov = torch.zeros_like(cov)
-        n_obs = 0
+        n_obs = torch.zeros([])
 
         for b in range(n // batch_size):
             z_batch = z[b * batch_size:(b+1) * batch_size]

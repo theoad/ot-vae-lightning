@@ -2,6 +2,7 @@ seed_everything: 42
 trainer:
   max_epochs: 100
   num_sanity_val_steps: 50
+  accelerator: gpu
   logger:
     class_path: pytorch_lightning.loggers.WandbLogger
     init_args:
@@ -43,9 +44,9 @@ data:
   init_args:
     test_val_split: 0.9
     seed: 42
-    train_batch_size: 32
-    val_batch_size: 64
-    test_batch_size: 64
+    train_batch_size: 10
+    val_batch_size: 20
+    test_batch_size: 20
     num_workers: 10
 optimizer:
   class_path: torch.optim.Adam
